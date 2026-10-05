@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+NPROC="$(nproc)"
+BUILD="${BUILD:-$(pwd)/build}"
+
 # === Конфигурация ===
 LFS="${LFS:-/mnt/lfs}"
 VERSION="${VERSION:-1.0}"
@@ -52,6 +55,7 @@ stage_prepare() {
 
     # Создать LFS-директорию
     mkdir -p "$LFS"
+    mkdir -pv "$LFS"/{dev,proc,sys,run}
 
     # Скачать пакеты
     if [ ! -f "$LFS/$LFS_TARBALL" ]; then
