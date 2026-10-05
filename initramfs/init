@@ -1,0 +1,98 @@
+#!/bin/busybox sh
+# KwasOS Live init
+# Copyright (C) 2026 KwasOS Project
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+echo "=========================================="
+echo " KwasOS Live - init"
+echo "=========================================="
+
+/bin/busybox mount -t proc none /proc
+/bin/busybox mount -t sysfs none /sys
+/bin/busybox mount -t devtmpfs none /dev
+
+# Запускаем mdev для hotplug-событий
+echo /sbin/mdev > /proc/sys/kernel/hotplug
+/bin/busybox mdev -s
+echo "[init] mdev started"
+
+# Явно грузим драйверы (на случай =m)
+for mod in \
+    xhci_hcd xhci_pci ehci_hcd ehci_pci ohci_hcd ohci_pci uhci_hcd \
+    usb_storage uas sd_mod sr_mod usbhid \
+    virtio_blk virtio_pci \
+    ahci libahci ata_piix nvme nvme_core; do
+    /bin/busybox modprobe "$mod" 2>/dev/null
+done
+echo "[init] drivers loaded"
+
+# Ждём появления блочных устройств
+echo "[init] waiting for block devices..."
+i=0
+while [ "$i" -lt 60 ]; do
+    if [ -b /dev/sda ] || [ -b /dev/sr0 ] || [ -b /dev/vda ] || [ -b /dev/nvme0n1 ]; then
+        echo "[init] block device appeared after ${i}s"
+        break
+    fi
+    /bin/busybox sleep 1
+    i=$((i+1))
+done
+
+echo "[init] block devices:"
+ls -la /dev/sd* /dev/sr* /dev/vd* /dev/nvme* 2>/dev/null || echo "  (none)"
+
+/bin/busybox mkdir -p /mnt/root
+ROOT_DEV=""
+
+CANDS="/dev/sr0 /dev/sda /dev/sdb /dev/vda /dev/nvme0n1 \
+       /dev/sda1 /dev/sda2 /dev/sda3 /dev/sda4 \
+       /dev/sdb1 /dev/sdb2 /dev/sdb3 /dev/sdb4 \
+       /dev/vda1 /dev/vda2 /dev/nvme0n1p1 /dev/nvme0n1p2"
+
+for fs in udf iso9660 vfat ext4; do
+    for dev in $CANDS; do
+        [ -b "$dev" ] || continue
+        echo "[init] try $dev as $fs"
+        if /bin/busybox mount -t "$fs" -o ro "$dev" /mnt/root 2>/dev/null; then
+            if [ -f /mnt/root/filesystem.squashfs ]; then
+                echo "[init] *** FOUND on $dev ($fs) ***"
+                ROOT_DEV=$dev
+                break 2
+            fi
+            /bin/busybox umount /mnt/root
+        fi
+    done
+done
+
+if [ -z "$ROOT_DEV" ]; then
+    echo "[init] !!! filesystem.squashfs NOT FOUND !!!"
+    exec /bin/busybox sh
+fi
+
+echo "[init] mounting squashfs..."
+/bin/busybox mkdir -p /mnt/squashfs
+if ! /bin/busybox mount -t squashfs -o loop,ro /mnt/root/filesystem.squashfs /mnt/squashfs; then
+    echo "[init] !!! squashfs mount failed !!!"
+    exec /bin/busybox sh
+fi
+
+echo "[init] setting up overlayfs..."
+/bin/busybox mkdir -p /mnt/overlay
+/bin/busybox mount -t tmpfs tmpfs /mnt/overlay
+/bin/busybox mkdir -p /mnt/overlay/upper /mnt/overlay/work
+
+/bin/busybox mkdir -p /mnt/newroot
+if ! /bin/busybox mount -t overlay overlay \
+    -o lowerdir=/mnt/squashfs,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work \
+    /mnt/newroot; then
+    echo "[init] !!! overlay mount failed !!!"
+    exec /bin/busybox sh
+fi
+
+if [ ! -x /mnt/newroot/usr/lib/systemd/systemd ]; then
+    echo "[init] !!! systemd not found !!!"
+    exec /bin/busybox sh
+fi
+
+echo "[init] switch_root -> systemd"
+exec /bin/busybox switch_root /mnt/newroot /usr/lib/systemd/systemd

@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+logs/
+*.iso
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*~
+
+# Downloaded packages (не коммитим 600MB пакетов)
+lfs-packages-*.tar
+*.tar.xz
+*.tar.gz
+*.tar.bz2
+
+# Editor
+.vscode/
+.idea/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
