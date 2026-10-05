@@ -10,12 +10,18 @@ LOG      := $(CURDIR)/logs
 
 .PHONY: all help prepare cross chroot system final live clean distclean
 
-all: prepare cross chroot system final live
-	@echo ""
-	@echo "========================================="
-	@echo " KwasOS $(VERSION) собран успешно!"
-	@echo " ISO: $(BUILD)/kwasos-$(VERSION).iso"
-	@echo "========================================="
+all:
+	@$(MAKE) prepare && \
+	 $(MAKE) cross && \
+	 $(MAKE) chroot && \
+	 $(MAKE) system && \
+	 $(MAKE) final && \
+	 $(MAKE) live && \
+	 echo "" && \
+	 echo "=========================================" && \
+	 echo " KwasOS $(VERSION) собран успешно!" && \
+	 echo " ISO: $(BUILD)/kwasos-$(VERSION).iso" && \
+	 echo "========================================="
 
 help:
 	@echo "KwasOS Build System"
