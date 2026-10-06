@@ -99,13 +99,16 @@ fix_ownership() {
 stage_prepare() {
     check_root
     check_deps
+
+    # FIX: создаём $LFS ДО скачивания, иначе wget не может открыть
+    #      /mnt/lfs/lfs-packages-13.0.tar (нет родительского каталога).
+    #      Проверяем также, что LFS не пустой и абсолютный.
+    [ -n "$LFS" ]            || die "LFS не задан"
+    [ "${LFS#/}" != "$LFS" ] || die "LFS должен быть абсолютным путём (сейчас: '$LFS')"
+    mkdir -pv "$LFS"
+    mkdir -pv "$LOG"
+
     log "Подготовка окружения..."
-
-    # FIX: удалён ошибочно попавший сюда кусок из Makefile
-    # (@mkdir -p $(LOG) / @bash scripts/build.sh $(S) ... / exit ${PIPESTATUS[0]})
-    # Makefile и так создаёт $LOG и вызывает этот скрипт.
-
-    mkdir -p "$LOG"
 
     # --- Скачать пакеты ---
     if [ ! -f "$LFS/$LFS_TARBALL" ]; then
