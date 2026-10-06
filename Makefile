@@ -2,6 +2,7 @@
 # Copyright (C) 2026 KwasOS Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+SHELL   := /bin/bash
 LFS     ?= /mnt/lfs
 VERSION ?= 1.0
 BUILD   ?= $(CURDIR)/build
@@ -13,36 +14,48 @@ export LFS VERSION BUILD LOG FORCE
 .PHONY: all help prepare cross chroot system final live clean distclean
 
 all:
-	@$(MAKE) --no-print-directory _stage S=all
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh all 2>&1 | tee -a $(LOG)/build.log
+	@exit $${PIPESTATUS[0]}
 
 help:
 	@bash scripts/build.sh
 
 prepare:
-	@$(MAKE) --no-print-directory _stage S=prepare
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh prepare 2>&1 | tee -a $(LOG)/build.log
+	@exit $${PIPESTATUS[0]}
 
 cross:
-	@$(MAKE) --no-print-directory _stage S=cross
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh cross 2>&1 | tee -a $(LOG)/build.log
+	@exit $${PIPESTATUS[0]}
 
 chroot:
-	@$(MAKE) --no-print-directory _stage S=chroot
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh chroot 2>&1 | tee -a $(LOG)/build.log
+	@exit $${PIPESTATUS[0]}
 
 system:
-	@$(MAKE) --no-print-directory _stage S=system
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh system 2>&1 | tee -a $(LOG)/build.log
+	@exit $${PIPESTATUS[0]}
 
 final:
-	@$(MAKE) --no-print-directory _stage S=final
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh final 2>&1 | tee -a $(LOG)/build.log
+	@exit $${PIPESTATUS[0]}
 
 live:
-	@$(MAKE) --no-print-directory _stage S=live
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh live 2>&1 | tee -a $(LOG)/build.log
+	@exit $${PIPESTATUS[0]}
 
 clean:
-	@bash scripts/build.sh clean
+	@rm -rf $(LOG) $(LFS)/.stamps
+	@echo "Логи и маркеры очищены"
 
 distclean:
-	@echo "Удалить $(LFS) и build? [y/N]"; \
-	read ans; [ "$$ans" = "y" ] && sudo rm -rf $(LFS) $(BUILD)
-
-_stage:
-	@bash scripts/build.sh $(S) 2>&1 | tee -a $(LOG)/build.log; \
-	exit $${PIPESTATUS[0]}
+	@echo "Удалить $(LFS) и $(BUILD)? [y/N]"; \
+	read ans; \
+	if [ "$$ans" = "y" ]; then sudo rm -rf $(LFS) $(BUILD); fi
