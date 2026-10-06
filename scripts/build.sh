@@ -107,6 +107,7 @@ stage_prepare() {
 
     # Права
     chown -v lfs "$LFS"/{usr{,/*},var,etc,tools}
+    chown -Rv lfs "$LFS/tools"
     case $(uname -m) in
         x86_64) chown -v lfs "$LFS/lib64" ;;
     esac
@@ -118,6 +119,9 @@ stage_prepare() {
 stage_cross() {
     check_root
     log "Сборка кросс-тулчейна (главы 5-6)..."
+
+    # Гарантируем, что lfs владеет всей структурой
+    chown -R lfs:lfs "$LFS"/usr "$LFS"/var "$LFS"/etc "$LFS"/tools "$LFS"/lib64
 
     sudo -u lfs env -i \
         HOME=/home/lfs \
