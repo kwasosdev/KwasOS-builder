@@ -122,7 +122,7 @@ stage_prepare() {
     # --- Распаковать ---
     if [ ! -d "$LFS/sources" ]; then
         log "Распаковка пакетов..."
-        (cd "$LFS" && tar xf "$LFS_TARBALL" && mv 13.0 sources)
+        (cd "$LFS" && tar xf "$LFS_TARBALL" && mv lfs-packages-13.0 sources)
         chmod -v a+wt "$LFS/sources"
     else
         ok "Пакеты уже распакованы"
@@ -170,7 +170,7 @@ stage_cross() {
     fix_ownership lfs
 
     # Очищаем возможные остатки прошлой сборки
-    rm -rf "$LFS"/sources/binutils-* "$LFS"/sources/gcc-* "$LFS"/tools/*
+    find "$LFS/sources" -maxdepth 1 -type d \( -name 'binutils-*' -o -name 'gcc-*' \) -exec rm -rf {} + rm -rf "$LFS"/tools/*
 
     # Явно передаём все переменные — никаких .bash_profile!
     sudo -u lfs env -i \
