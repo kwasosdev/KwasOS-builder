@@ -137,7 +137,7 @@ CONFIG_SITE=\$LFS/usr/share/config.site
 export LFS LC_ALL LFS_TGT PATH CONFIG_SITE
 export MAKEFLAGS=-j$NPROC
 EOF
-        bash -e \$LFS/lfs-cross.sh
+        source \$HOME/.bash_profile && bash -e \$LFS/lfs-cross.sh
     "
     ok "Кросс-тулчейн собран"
 }
