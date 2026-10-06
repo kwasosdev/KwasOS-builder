@@ -4,5 +4,5 @@ ID=kwasos
 ID_LIKE=lfs
 PRETTY_NAME="KwasOS 1.0"
 VERSION_CODENAME="kwasik"
-HOME_URL="https://https://github.com/kwasosdev/KwasOS"
+HOME_URL="https://github.com/kwasosdev/KwasOS"
 RELEASE_TYPE="stable"

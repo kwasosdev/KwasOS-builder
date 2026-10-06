@@ -25,10 +25,14 @@ done
 echo "[init] drivers loaded"
 
 # Ждём появления блочных устройств
+# FIX: добавлены партиции — Rufus в ISO-режиме создаёт таблицу разделов,
+#      squashfs лежит внутри /dev/sdX1, а не в /dev/sdX.
 echo "[init] waiting for block devices..."
 i=0
 while [ $i -lt 60 ]; do
-    if [ -b /dev/sda ] || [ -b /dev/sr0 ] || [ -b /dev/vda ] || [ -b /dev/nvme0n1 ]; then
+    if [ -b /dev/sda ] || [ -b /dev/sr0 ] || [ -b /dev/vda ] || \
+       [ -b /dev/nvme0n1 ] || [ -b /dev/sda1 ] || [ -b /dev/vda1 ] || \
+       [ -b /dev/nvme0n1p1 ]; then
         echo "[init] block device appeared after ${i}s"
         break
     fi

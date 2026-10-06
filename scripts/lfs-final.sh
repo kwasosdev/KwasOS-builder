@@ -3,6 +3,8 @@
 # Final steps to configure and boot the system (chapters 9-11)
 # by Luís Mendes :)
 # Updated for LFS 13.0
+# FIX: добавлены опции ядра для Live-режима (squashfs/overlay/loop/USB),
+#      брендинг заменён с LFS на KwasOS.
 
 package_name=""
 package_ext=""
@@ -27,8 +29,6 @@ finish() {
 cd /sources
 
 # 9.2. General Network Configuration (systemd-networkd)
-# Use DHCP on any wired interface so the booted system gets networking
-# automatically, regardless of the interface name it is given.
 ln -sfv /dev/null /etc/systemd/network/99-default.link
 
 cat > /etc/systemd/network/10-eth-dhcp.network << "EOF"
@@ -53,14 +53,16 @@ nameserver 8.8.4.4
 EOF
 
 # 9.2.5. Configuring the system hostname
-echo "lfs" > /etc/hostname
+# FIX: kwasos вместо lfs
+echo "kwasos" > /etc/hostname
 
 # 9.2.6. Customizing the /etc/hosts File
+# FIX: kwasos вместо lfs
 cat > /etc/hosts << "EOF"
 # Begin /etc/hosts
 
 127.0.0.1 localhost.localdomain localhost
-127.0.1.1 lfs
+127.0.1.1 kwasos
 ::1       localhost ip6-localhost ip6-loopback
 ff02::1   ip6-allnodes
 ff02::2   ip6-allrouters
@@ -105,30 +107,16 @@ EOF
 # 9.8. Creating the /etc/inputrc File
 cat > /etc/inputrc << "EOF"
 # Begin /etc/inputrc
-# Modified by Chris Lynn <roryo@roryo.dynup.net>
-
-# Allow the command prompt to wrap to the next line
 set horizontal-scroll-mode Off
-
-# Enable 8-bit input
 set meta-flag On
 set input-meta On
-
-# Turns off 8th bit stripping
 set convert-meta Off
-
-# Keep the 8th bit for display
 set output-meta On
-
-# none, visible or audible
 set bell-style none
 
-# All of the following map the escape sequence of the value
-# contained in the 1st argument to the readline specific functions
 "\eOd": backward-word
 "\eOc": forward-word
 
-# for linux console
 "\e[1~": beginning-of-line
 "\e[4~": end-of-line
 "\e[5~": beginning-of-history
@@ -136,11 +124,9 @@ set bell-style none
 "\e[3~": delete-char
 "\e[2~": quoted-insert
 
-# for xterm
 "\eOH": beginning-of-line
 "\eOF": end-of-line
 
-# for Konsole
 "\e[H": beginning-of-line
 "\e[F": end-of-line
 
@@ -158,9 +144,6 @@ cat > /etc/shells << "EOF"
 EOF
 
 # 10.2. Creating the /etc/fstab File
-# ROOT_UUID and GRUB_DISK are exported by the build orchestration so the system
-# boots reliably regardless of how the disk is enumerated (sda/sdb/vda...).
-# The fallbacks match the LFS book's single-disk example (root on /dev/sda1).
 ROOT_UUID="${ROOT_UUID:-}"
 ROOT_PARTUUID="${ROOT_PARTUUID:-}"
 GRUB_DISK="${GRUB_DISK:-/dev/sda}"
@@ -183,8 +166,12 @@ cd /sources
 begin linux-6.18.10 tar.xz
 make mrproper
 make defconfig
-# Ensure the options systemd and this VM need are enabled, then let the kernel
-# resolve dependencies non-interactively.
+
+# --- Base options systemd needs ---
+# FIX: расширен набор опций — теперь ядро умеет squashfs/overlay/loop,
+#      читает ISO9660/UDF, видит USB-накопители и Fat-разделы.
+#      Всё это должно быть =y (встроено), потому что initramfs
+#      не содержит модулей и busybox modprobe не сможет их подгрузить.
 scripts/config --enable  CONFIG_DEVTMPFS                \
                --enable  CONFIG_DEVTMPFS_MOUNT          \
                --enable  CONFIG_CGROUPS                 \
@@ -211,7 +198,49 @@ scripts/config --enable  CONFIG_DEVTMPFS                \
                --enable  CONFIG_VIRTIO_PCI              \
                --enable  CONFIG_VIRTIO_NET              \
                --enable  CONFIG_E1000                   \
-               --enable  CONFIG_BLK_DEV_SD
+               --enable  CONFIG_BLK_DEV_SD              \
+               --enable  CONFIG_SCSI                    \
+               \
+               --enable  CONFIG_SQUASHFS                \
+               --enable  CONFIG_SQUASHFS_XZ             \
+               --enable  CONFIG_OVERLAY_FS              \
+               --enable  CONFIG_BLK_DEV_LOOP            \
+               --enable  CONFIG_BLK_DEV_INITRD          \
+               --enable  CONFIG_RD_GZIP                 \
+               \
+               --enable  CONFIG_ISO9660_FS              \
+               --enable  CONFIG_UDF_FS                  \
+               --enable  CONFIG_VFAT_FS                 \
+               --enable  CONFIG_FAT_FS                  \
+               --enable  CONFIG_MSDOS_FS                \
+               --enable  CONFIG_NLS_CODEPAGE_437        \
+               --enable  CONFIG_NLS_ISO8859_1           \
+               --enable  CONFIG_NLS_UTF8                \
+               \
+               --enable  CONFIG_USB_SUPPORT             \
+               --enable  CONFIG_USB                     \
+               --enable  CONFIG_USB_XHCI_HCD            \
+               --enable  CONFIG_USB_EHCI_HCD            \
+               --enable  CONFIG_USB_OHCI_HCD            \
+               --enable  CONFIG_USB_STORAGE             \
+               --enable  CONFIG_USB_UAS                 \
+               --enable  CONFIG_USB_HID                 \
+               --enable  CONFIG_HID_GENERIC             \
+               --enable  CONFIG_INPUT_EVDEV             \
+               --enable  CONFIG_INPUT_KEYBOARD          \
+               --enable  CONFIG_KEYBOARD_ATKBD          \
+               --enable  CONFIG_SERIO                   \
+               --enable  CONFIG_SERIO_I8042             \
+               \
+               --enable  CONFIG_FB                      \
+               --enable  CONFIG_FRAMEBUFFER_CONSOLE     \
+               --enable  CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY \
+               --enable  CONFIG_DRM                     \
+               --enable  CONFIG_DRM_SIMPLEDRM           \
+               --enable  CONFIG_DRM_I915                \
+               --enable  CONFIG_DRM_AMDGPU              \
+               --enable  CONFIG_DRM_NOUVEAU
+
 make olddefconfig
 make
 make modules_install
@@ -233,12 +262,6 @@ install uhci_hcd /sbin/modprobe ehci_hcd ; /sbin/modprobe -i uhci_hcd ; true
 EOF
 
 # 10.4. Using GRUB to Set Up the Boot Process
-# Install GRUB to the MBR of the disk holding the LFS root (GRUB_DISK, provided
-# by the orchestration; defaults to /dev/sda). GRUB locates /boot by filesystem
-# UUID (search --fs-uuid), which is immune to disk reordering. The kernel's
-# root= must use PARTUUID (not the filesystem UUID): without an initramfs -- and
-# LFS builds none -- the kernel cannot resolve a filesystem UUID, but it can
-# resolve a PARTUUID natively. PARTUUID is likewise immune to disk reordering.
 grub-install "$GRUB_DISK"
 if [ -n "$ROOT_UUID" ] && [ -n "$ROOT_PARTUUID" ]; then
 cat > /boot/grub/grub.cfg << EOF
@@ -271,20 +294,24 @@ EOF
 fi
 
 # 11.1. The End
+# FIX: релиз теперь KwasOS, а не Linux From Scratch.
 echo 13.0-systemd > /etc/lfs-release
+
 cat > /etc/lsb-release << "EOF"
-DISTRIB_ID="Linux From Scratch"
-DISTRIB_RELEASE="13.0-systemd"
-DISTRIB_CODENAME="lfs"
-DISTRIB_DESCRIPTION="Linux From Scratch"
+DISTRIB_ID="KwasOS"
+DISTRIB_RELEASE="1.0"
+DISTRIB_CODENAME="kwasik"
+DISTRIB_DESCRIPTION="KwasOS 1.0"
 EOF
+
 cat > /etc/os-release << "EOF"
-NAME="Linux From Scratch"
-VERSION="13.0-systemd"
-ID=lfs
-PRETTY_NAME="Linux From Scratch 13.0-systemd"
-VERSION_CODENAME="lfs"
-HOME_URL="https://www.linuxfromscratch.org/lfs/"
+NAME="KwasOS"
+VERSION="1.0"
+ID=kwasos
+ID_LIKE=lfs
+PRETTY_NAME="KwasOS 1.0"
+VERSION_CODENAME="kwasik"
+HOME_URL="https://github.com/kwasosdev/KwasOS"
 RELEASE_TYPE="stable"
 EOF
 

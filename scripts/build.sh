@@ -101,9 +101,11 @@ stage_prepare() {
     check_deps
     log "Подготовка окружения..."
 
-	@mkdir -p $(LOG)
-	@bash scripts/build.sh $(S) 2>&1 | tee -a $(LOG)/build.log; \
-	exit $${PIPESTATUS[0]}
+    # FIX: удалён ошибочно попавший сюда кусок из Makefile
+    # (@mkdir -p $(LOG) / @bash scripts/build.sh $(S) ... / exit ${PIPESTATUS[0]})
+    # Makefile и так создаёт $LOG и вызывает этот скрипт.
+
+    mkdir -p "$LOG"
 
     # --- Скачать пакеты ---
     if [ ! -f "$LFS/$LFS_TARBALL" ]; then
@@ -372,7 +374,6 @@ stage_final() {
 
     unmount_all
 
-    # Переименовываем ядро? Нет — оставляем как есть, чтобы меньше путаницы
     ok "Ядро и настройка завершены"
 }
 
@@ -414,10 +415,12 @@ stage_live() {
     # --- squashfs ---
     log "Создание squashfs (15-30 минут)..."
     rm -f "$live_dir/filesystem.squashfs"
+    # FIX: явно исключаем виртуальные каталоги и служебные пути
     mksquashfs "$LFS" "$live_dir/filesystem.squashfs" \
         -comp xz \
         -e boot live_iso sources "${LFS_TARBALL}" \
-        kwasos-*.iso 2>&1 | tail -20
+           proc sys dev run tmp mnt media \
+           kwasos-*.iso 2>&1 | tail -20
 
     # --- ISO ---
     log "Сборка ISO через grub-mkrescue..."
