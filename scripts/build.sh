@@ -101,7 +101,9 @@ stage_prepare() {
     check_deps
     log "Подготовка окружения..."
 
-    mkdir -p "$LFS" "$BUILD" "$LOG" "$STAMPS"
+	@mkdir -p $(LOG)
+	@bash scripts/build.sh $(S) 2>&1 | tee -a $(LOG)/build.log; \
+	exit $${PIPESTATUS[0]}
 
     # --- Скачать пакеты ---
     if [ ! -f "$LFS/$LFS_TARBALL" ]; then
