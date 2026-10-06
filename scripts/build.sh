@@ -143,6 +143,26 @@ stage_chroot() {
     check_root
     log "Сборка chroot-инструментов (глава 7)..."
 
+    log "Создание базовых директорий в $LFS..."
+    mkdir -pv "$LFS"/{dev,proc,sys,run,tmp}
+    chmod 1777 "$LFS/tmp"
+    mkdir -pv "$LFS"/{boot,home,mnt,opt,srv}
+    mkdir -pv "$LFS"/etc/{opt,sysconfig}
+    mkdir -pv "$LFS"/lib/firmware
+    mkdir -pv "$LFS"/media/{floppy,cdrom}
+    mkdir -pv "$LFS"/usr/{,local/}{include,src}
+    mkdir -pv "$LFS"/usr/lib/locale
+    mkdir -pv "$LFS"/usr/local/{bin,lib,sbin}
+    mkdir -pv "$LFS"/usr/{,local/}share/{color,dict,doc,info,locale,man}
+    mkdir -pv "$LFS"/usr/{,local/}share/{misc,terminfo,zoneinfo}
+    mkdir -pv "$LFS"/usr/{,local/}share/man/man{1..8}
+    mkdir -pv "$LFS"/var/{cache,local,log,mail,opt,spool}
+    mkdir -pv "$LFS"/var/lib/{color,misc,locate}
+    install -dv -m 0750 "$LFS/root"
+    install -dv -m 1777 "$LFS/tmp" "$LFS/var/tmp"
+    ln -sfv /run "$LFS/var/run"
+    ln -sfv /run/lock "$LFS/var/lock"
+
     # Передать владение root
     chown --from lfs -R root:root "$LFS"/{usr,var,etc,tools}
     case $(uname -m) in
