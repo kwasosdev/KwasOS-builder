@@ -6,6 +6,7 @@
 set -euo pipefail
 
 # Абсолютные пути к проекту
+LOG="${LOG:-$(pwd)/logs}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
