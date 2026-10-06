@@ -118,27 +118,18 @@ stage_cross() {
     check_root
     log "Сборка кросс-тулчейна (главы 5-6)..."
 
-    sudo -u lfs bash -c "
-        export LFS=$LFS
-        cd \$HOME
-        cat > .bash_profile << 'EOF'
-exec env -i HOME=\$HOME TERM=\$TERM PS1='\u:\w\\\$ ' /bin/bash
-EOF
-        cat > .bashrc << 'EOF'
-set +h
-umask 022
-LFS=$LFS
-LC_ALL=POSIX
-LFS_TGT=\$(uname -m)-lfs-linux-gnu
-PATH=/usr/bin
-if [ ! -L /bin ]; then PATH=/bin:\$PATH; fi
-PATH=\$LFS/tools/bin:\$PATH
-CONFIG_SITE=\$LFS/usr/share/config.site
-export LFS LC_ALL LFS_TGT PATH CONFIG_SITE
-export MAKEFLAGS=-j$NPROC
-EOF
-        source \$HOME/.bash_profile && bash -e \$LFS/lfs-cross.sh
-    "
+    sudo -u lfs env -i \
+        HOME=/home/lfs \
+        TERM="${TERM:-linux}" \
+        PS1='\u:\w\$ ' \
+        LFS="$LFS" \
+        LC_ALL=POSIX \
+        LFS_TGT="$(uname -m)-lfs-linux-gnu" \
+        PATH="$LFS/tools/bin:/usr/bin:/bin" \
+        CONFIG_SITE="$LFS/usr/share/config.site" \
+        MAKEFLAGS="-j$NPROC" \
+        bash -e "$LFS/lfs-cross.sh" 2>&1 | tee "$LOG/cross.log"
+
     ok "Кросс-тулчейн собран"
 }
 
