@@ -4,24 +4,22 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 echo "=========================================="
-echo " KwasOS Live - init"
+echo " KwasOS Live - initializing"
 echo "=========================================="
 
 /bin/busybox mount -t proc none /proc
 /bin/busybox mount -t sysfs none /sys
 /bin/busybox mount -t devtmpfs none /dev
 
-# Запускаем mdev для hotplug-событий
+# mdev для hotplug-событий (авто-создание /dev/sdX)
 echo /sbin/mdev > /proc/sys/kernel/hotplug
 /bin/busybox mdev -s
 echo "[init] mdev started"
 
-# Явно грузим драйверы (на случай =m)
-for mod in \
-    xhci_hcd xhci_pci ehci_hcd ehci_pci ohci_hcd ohci_pci uhci_hcd \
-    usb_storage uas sd_mod sr_mod usbhid \
-    virtio_blk virtio_pci \
-    ahci libahci ata_piix nvme nvme_core; do
+# Явно грузим драйверы (на случай если они =m)
+for mod in xhci_hcd xhci_pci ehci_hcd ehci_pci ohci_hcd ohci_pci uhci_hcd \
+           usb_storage uas sd_mod sr_mod usbhid \
+           virtio_blk virtio_pci ahci libahci ata_piix nvme nvme_core; do
     /bin/busybox modprobe "$mod" 2>/dev/null
 done
 echo "[init] drivers loaded"
@@ -29,7 +27,7 @@ echo "[init] drivers loaded"
 # Ждём появления блочных устройств
 echo "[init] waiting for block devices..."
 i=0
-while [ "$i" -lt 60 ]; do
+while [ $i -lt 60 ]; do
     if [ -b /dev/sda ] || [ -b /dev/sr0 ] || [ -b /dev/vda ] || [ -b /dev/nvme0n1 ]; then
         echo "[init] block device appeared after ${i}s"
         break
@@ -43,7 +41,6 @@ ls -la /dev/sd* /dev/sr* /dev/vd* /dev/nvme* 2>/dev/null || echo "  (none)"
 
 /bin/busybox mkdir -p /mnt/root
 ROOT_DEV=""
-
 CANDS="/dev/sr0 /dev/sda /dev/sdb /dev/vda /dev/nvme0n1 \
        /dev/sda1 /dev/sda2 /dev/sda3 /dev/sda4 \
        /dev/sdb1 /dev/sdb2 /dev/sdb3 /dev/sdb4 \
