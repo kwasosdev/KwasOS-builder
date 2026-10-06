@@ -93,7 +93,7 @@ stage_prepare() {
 
     # Копировать скрипты
     log "Копирование скриптов..."
-    cp -v "$PROJECT_DIR/scripts/lfs-*.sh" "$LFS/"
+    cp -v "$PROJECT_DIR"/scripts/lfs-*.sh "$LFS/"
 
     # Создать пользователя lfs
     if ! id lfs >/dev/null 2>&1; then
