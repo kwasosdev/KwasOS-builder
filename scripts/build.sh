@@ -14,7 +14,7 @@ KERNEL_VER="6.18.10"
 KERNEL_PKG="linux-${KERNEL_VER}"
 KERNEL_NAME="vmlinuz-${KERNEL_VER}-lfs-13.0-systemd"
 INITRD_NAME="initrd.img-${KERNEL_VER}"
-LFS_TARBALL_URL="https://mirror.dogado.de/lfs/lfs-packages/lfs-packages-13.0.tar"
+LFS_TARBALL_URL="http://ftp.osuosl.org/pub/lfs/lfs-packages/lfs-packages-13.0.tar"
 LFS_TARBALL="lfs-packages-13.0.tar"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
