@@ -93,7 +93,7 @@ stage_prepare() {
 
     # Копировать скрипты
     log "Копирование скриптов..."
-    cp -v scripts/lfs-*.sh "$LFS/"
+    cp -v "$PROJECT_DIR/scripts/lfs-*.sh" "$LFS/"
 
     # Создать пользователя lfs
     if ! id lfs >/dev/null 2>&1; then
@@ -215,7 +215,7 @@ stage_live() {
 
     # GRUB конфиг
     log "Копирование grub.cfg..."
-    cp -v configs/grub.cfg "$live_dir/boot/grub/grub.cfg"
+    cp -v "$PROJECT_DIR/configs/grub.cfg" "$live_dir/boot/grub/grub.cfg"
 
     # Squashfs
     log "Создание squashfs (это займёт 15-30 минут)..."
