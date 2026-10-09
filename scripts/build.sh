@@ -471,7 +471,8 @@ build_initramfs() {
 
     rm -rf "$work"
 
-    local size=$(stat -c%s "$LFS/boot/$INITRD_NAME")
+    local size
+    size=$(stat -c%s "$LFS/boot/$INITRD_NAME")
     [ "$size" -gt 1000000 ] || die "initrd слишком маленький ($size байт) — что-то не так"
     ok "initramfs собран: $(du -h "$LFS/boot/$INITRD_NAME" | cut -f1)"
 }
