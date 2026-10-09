@@ -14,8 +14,16 @@ KERNEL_VER="6.18.10"
 KERNEL_PKG="linux-${KERNEL_VER}"
 KERNEL_NAME="vmlinuz-${KERNEL_VER}-lfs-13.0-systemd"
 INITRD_NAME="initrd.img-${KERNEL_VER}"
-LFS_TARBALL_URL="http://ftp.osuosl.org/pub/lfs/lfs-packages/lfs-packages-13.0.tar"
-LFS_TARBALL="lfs-packages-13.0.tar"
+LFS_VERSION="13.0"
+# Зеркала с отдельными архивами пакетов (monolithic lfs-packages-<ver>.tar
+# больше нигде не публикуется — на ftp.osuosl.org он отдаёт 404/HTML-заглушку)
+MIRRORS=(
+    "https://mirror.dogado.de/LFS/lfs-packages/${LFS_VERSION}"
+    "https://mirror.metanet.ch/LFS/lfs-packages/${LFS_VERSION}"
+    "http://ftp.lfs-matrix.net/pub/lfs/lfs-packages/${LFS_VERSION}"
+    "https://mirror.koddos.net/lfs/lfs-packages/${LFS_VERSION}"
+)
+MD5SUMS_NAME="md5sums"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -100,9 +108,8 @@ stage_prepare() {
     check_root
     check_deps
 
-    # FIX: создаём $LFS ДО скачивания, иначе wget не может открыть
-    #      /mnt/lfs/lfs-packages-13.0.tar (нет родительского каталога).
-    #      Проверяем также, что LFS не пустой и абсолютный.
+    # Создаём $LFS ДО скачивания (иначе wget не может открыть файл).
+    # Проверяем также, что LFS не пустой и абсолютный.
     [ -n "$LFS" ]            || die "LFS не задан"
     [ "${LFS#/}" != "$LFS" ] || die "LFS должен быть абсолютным путём (сейчас: '$LFS')"
     mkdir -pv "$LFS"
@@ -111,22 +118,89 @@ stage_prepare() {
     log "Подготовка окружения..."
 
     # --- Скачать пакеты ---
-    if [ ! -f "$LFS/$LFS_TARBALL" ]; then
-        log "Скачивание пакетов LFS 13.0 (~633 МБ)..."
-        wget --progress=dot:giga -O "$LFS/$LFS_TARBALL" "$LFS_TARBALL_URL" 2>&1 | \
-            tee "$LOG/download.log" | tail -5
+    # Monolithic lfs-packages-<ver>.tar больше не публикуется ни на одном
+    # официальном зеркале (ftp.osuosl.org отдаёт HTML-заглушку 404 вместо
+    # tar-архива — из-за этого 'mv: cannot stat lfs-packages-13.0').
+    # Качаем отдельные архивы по списку md5sums с первым доступного зеркала.
+    mkdir -p "$LFS/sources"
+
+    local md5file="$LFS/sources/$MD5SUMS_NAME" mirror base got_md5=""
+    if [ ! -s "$md5file" ]; then
+        for mirror in "${MIRRORS[@]}"; do
+            if wget -q -O "$md5file" "$mirror/$MD5SUMS_NAME"; then
+                base="$mirror"; got_md5=1; break
+            fi
+        done
+        [ -n "$got_md5" ] || die "Не удалось скачать $MD5SUMS_NAME ни с одного зеркала"
     else
-        ok "Пакеты уже скачаны"
+        # список уже есть — определим рабочее зеркало для докачки
+        for mirror in "${MIRRORS[@]}"; do
+            if wget -q --spider "$mirror/$MD5SUMS_NAME"; then
+                base="$mirror"; break
+            fi
+        done
+    fi
+    [ -n "${base:-}" ] || die "Ни одно зеркало недоступно: ${MIRRORS[*]}"
+    ok "Зеркало: $base"
+
+    # Файлы для скачивания (только tar/zip-архивы, патчи и т.п. качаем тоже)
+    local total ok_cnt=0 fail_list=()
+    total=$(awk '{print $2}' "$md5file" | wc -l)
+    log "Проверка/скачивание пакетов LFS $LFS_VERSION ($total файлов)... "
+
+    local fname fpath
+    while read -r _want_hash fname; do
+        [ -n "$fname" ] || continue
+        fpath="$LFS/sources/$fname"
+        # если файл уже лежит в /mnt/lfs корнем (старый monolithic-распад) — перенесём
+        if [ ! -f "$fpath" ] && [ -f "$LFS/$fname" ]; then
+            mv -n "$LFS/$fname" "$fpath"
+        fi
+        if [ -f "$fpath" ] && \
+           echo "${_want_hash}  ${fname}" | (cd "$LFS/sources" && md5sum -c - --quiet 2>/dev/null); then
+            ok_cnt=$((ok_cnt + 1))
+            continue
+        fi
+        if ! wget -q --tries=3 --progress=dot:mega -O "$fpath" "$base/$fname" 2>&1; then
+            rm -f "$fpath"
+            fail_list+=("$fname")
+            continue
+        fi
+        if echo "${_want_hash}  ${fname}" | (cd "$LFS/sources" && md5sum -c - --quiet 2>/dev/null); then
+            ok_cnt=$((ok_cnt + 1))
+        else
+            warn "md5 не совпал: $fname (переходим на следующее зеркало)"
+            fail_list+=("$fname")
+        fi
+    done < "$md5file" | tee -a "$LOG/download.log"
+
+    # Повторная попытка для неудачных — через остальные зеркала
+    if [ ${#fail_list[@]} -gt 0 ]; then
+        for mirror in "${MIRRORS[@]}"; do
+            [ "${#fail_list[@]}" -eq 0 ] && break
+            [ "$mirror" = "${base:-}" ] && continue
+            warn "Докачка ${#fail_list[@]} файлов с $mirror"
+            local retry=() f
+            for f in "${fail_list[@]}"; do
+                if wget -q --tries=2 -O "$LFS/sources/$f" "$mirror/$f" && \
+                   grep "^.\{32\}  *$f\$" "$md5file" | (cd "$LFS/sources" && md5sum -c - --quiet 2>/dev/null); then
+                    ok_cnt=$((ok_cnt + 1))
+                else
+                    rm -f "$LFS/sources/$f"
+                    retry+=("$f")
+                fi
+            done
+            fail_list=("${retry[@]+"${retry[@]}"}")
+        done
     fi
 
-    # --- Распаковать ---
-    if [ ! -d "$LFS/sources" ]; then
-        log "Распаковка пакетов..."
-        (cd "$LFS" && tar xf "$LFS_TARBALL" && mv lfs-packages-13.0 sources)
-        chmod -v a+wt "$LFS/sources"
-    else
-        ok "Пакеты уже распакованы"
+    if [ ${#fail_list[@]} -gt 0 ]; then
+        err "Не удалось скачать: ${fail_list[*]}"
+        die "Скачивание пакетов завершено с ошибками (${ok_cnt}/$total успешно)"
     fi
+    ok "Все пакеты на месте и проверены (${ok_cnt}/$total)"
+
+    chmod -v a+wt "$LFS/sources"
 
     # --- Структура LFS ---
     log "Создание базовой структуры..."
@@ -421,7 +495,7 @@ stage_live() {
     # FIX: явно исключаем виртуальные каталоги и служебные пути
     mksquashfs "$LFS" "$live_dir/filesystem.squashfs" \
         -comp xz \
-        -e boot live_iso sources "${LFS_TARBALL}" \
+        -e boot live_iso sources "lfs-packages-${LFS_VERSION}.tar" \
            proc sys dev run tmp mnt media \
            kwasos-*.iso 2>&1 | tail -20
 
