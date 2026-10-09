@@ -161,18 +161,26 @@ stage_prepare() {
             ok_cnt=$((ok_cnt + 1))
             continue
         fi
-        if ! wget -q --tries=3 --progress=dot:mega -O "$fpath" "$base/$fname" 2>&1; then
-            rm -f "$fpath"
+        log "Скачивание [$((ok_cnt + ${#fail_list[@]} + 1))/$total]: $fname"
+        # -c: докачка с нуля НЕ работает, т.к. wget -O создаёт пустой файл
+        # перед загрузкой. Поэтому качаем во временный файл и докум его.
+        local tmp="$fpath.part"
+        if ! wget --continue --tries=3 --timeout=30 \
+                  --progress=dot:mega -O "$tmp" "$base/$fname" 2>>"$LOG/download.log"; then
+            # оборванная/неполная загрузка — оставляем .part для докачки при следующем запуске
+            warn "Загрузка прервана: $fname (частичный файл: $tmp — повторите make prepare для докачки)"
             fail_list+=("$fname")
             continue
         fi
+        mv -f "$tmp" "$fpath"
         if echo "${_want_hash}  ${fname}" | (cd "$LFS/sources" && md5sum -c - --quiet 2>/dev/null); then
             ok_cnt=$((ok_cnt + 1))
         else
-            warn "md5 не совпал: $fname (переходим на следующее зеркало)"
+            warn "md5 не совпал: $fname (удаляем, переходим на следующее зеркало)"
+            rm -f "$fpath"
             fail_list+=("$fname")
         fi
-    done < "$md5file" | tee -a "$LOG/download.log"
+    done < "$md5file"
 
     # Повторная попытка для неудачных — через остальные зеркала
     if [ ${#fail_list[@]} -gt 0 ]; then
@@ -182,7 +190,7 @@ stage_prepare() {
             warn "Докачка ${#fail_list[@]} файлов с $mirror"
             local retry=() f
             for f in "${fail_list[@]}"; do
-                if wget -q --tries=2 -O "$LFS/sources/$f" "$mirror/$f" && \
+                if wget -q --tries=2 --timeout=30 -O "$LFS/sources/$f" "$mirror/$f" && \
                    grep "^.\{32\}  *$f\$" "$md5file" | (cd "$LFS/sources" && md5sum -c - --quiet 2>/dev/null); then
                     ok_cnt=$((ok_cnt + 1))
                 else
