@@ -60,7 +60,7 @@ check_root() {
 
 check_deps() {
     local missing=()
-    for cmd in wget tar xz mksquashfs xorriso grub-mkrescue cpio nproc; do
+    for cmd in wget tar xz curl mksquashfs xorriso grub-mkrescue cpio nproc; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     if [ ${#missing[@]} -gt 0 ]; then
@@ -119,7 +119,7 @@ fix_ownership() {
 # Скачивание идёт во временный файл .part с --continue: при обрыве связи
 # загрузка продолжается с того же места при следующем запуске.
 download_tarball() {
-    local url size
+    local url size havesize wantsize
     # уже скачан и цел?
     if [ -f "$TARBALL_PATH" ] && [ "$(stat -c%s "$TARBALL_PATH")" -eq "$TARBALL_SIZE" ] \
        && tar tf "$TARBALL_PATH" >/dev/null 2>&1; then
@@ -129,28 +129,100 @@ download_tarball() {
     log "Скачивание пакетов LFS $LFS_VERSION (~633 МБ)..."
     for url in "${LFS_TARBALL_URLS[@]}"; do
         log "Зеркало: $url"
-        # --continue + отдельный .part: докачка работает корректно
-        wget --continue --tries=5 --timeout=60 --waitretry=10 \
-             --progress=dot:giga -O "$TARPART_PATH" "$url" 2>>"$LOG/download.log" || true
+        # ВАЖНО: не используем wget --continue/-O — с -O докачка молча
+        # перезаписывала файл с нуля, а --continue к чужому .part от другого
+        # зеркала мог привести к смешиванию байтов из разных источников.
+        # Вместо этого: полная загрузка файла в зеркалоспецифичный .part
+        # (атомарно через временный файл wget), проверка размера, затем
+        # дозакачка недостающих байтов диапазоном HTTP (curl -C / dd+Range).
+        local part="${TARPART_PATH}.$(printf '%s' "$url" | md5sum | cut -c1-8)"
+        while :; do
+            # 1) сколько уже скачано с ЭТОГО зеркала
+            havesize=$(stat -c%s "$part" 2>/dev/null || echo 0)
+            # 2) если .part нет, но есть полный или частичный файл с другого
+            #    зеркала — переиспользуем его только при совпадении контрольной
+            #    суммы первой части (гарантия, что байты идентичны)
+            if [ "$havesize" -eq 0 ]; then
+                for other in "${TARPART_PATH}".* "$TARBALL_PATH"; do
+                    [ "$other" = "$part" ] && continue
+                    [ -f "$other" ] || continue
+                    local osz; osz=$(stat -c%s "$other")
+                    [ "$osz" -gt 0 ] || continue
+                    if _part_matches_official "$other" "$osz"; then
+                        cp -f "$other" "$part"; havesize=$osz
+                        log "Переиспользую ${osz} байт из $(basename "$other") (контрольная сумма совпала)"
+                        break
+                    fi
+                done
+            fi
+            [ "$havesize" -ge "$TARBALL_SIZE" ] && break
+            # 3) проверка целостности уже скачанной части (первый 1 МиБ
+            #    сравниваем с эталоном с официального зеркала). Если часть
+            #    битая — начинаем с нуля, а не доклеиваем к мусору.
+            if [ "$havesize" -gt 0 ] && ! _part_matches_official "$part" "$havesize"; then
+                warn "Начало файла $part не совпадает с оригиналом — перекачиваю с нуля"
+                rm -f "$part"; havesize=0
+            fi
+            # 4) докачка недостающего хвоста диапазоном
+            log "Загрузка ${havesize}/${TARBALL_SIZE} байт..."
+            if ! _fetch_range "$url" "$part" "$havesize" "$TARBALL_SIZE"; then
+                warn "Не удалось докачать с $url — пробую следующее зеркало"
+                rm -f "$part"
+                break
+            fi
+            size=$(stat -c%s "$part" 2>/dev/null || echo 0)
+            if [ "$size" -le "$havesize" ]; then
+                warn "Сервер не добавил данных (${havesize} -> ${size}) — пробую следующее зеркало"
+                rm -f "$part"
+                break
+            fi
+        done
         # проверка размера
-        if [ ! -f "$TARPART_PATH" ]; then
-            warn "Файл не создан ($url) — пробую следующее зеркало"; continue
-        fi
-        size=$(stat -c%s "$TARPART_PATH")
-        if [ "$size" -ne "$TARBALL_SIZE" ]; then
-            warn "Неполная загрузка: $size/$TARBALL_SIZE байт ($url)."
-            warn "Часть сохранена в $TARPART_PATH — повторите 'make prepare' для докачки."
+        if [ ! -f "$part" ] || [ "$(stat -c%s "$part")" -ne "$TARBALL_SIZE" ]; then
+            warn "Неполная загрузка с $url ($(( $(stat -c%s "$part" 2>/dev/null || echo 0) / 1048576 ))/${TARBALL_SIZE} байт)."
+            warn "Часть сохранена в $part — повторите 'make prepare' для докачки."
             continue
         fi
-        mv -f "$TARPART_PATH" "$TARBALL_PATH"
+        mv -f "$part" "$TARBALL_PATH"
         if tar tf "$TARBALL_PATH" >/dev/null 2>&1; then
             ok "Архив скачан и проверен ($(du -h "$TARBALL_PATH" | cut -f1))"
+            rm -f "${TARPART_PATH}".*   # подчистить части других зеркал
             return 0
         fi
         warn "Архив повреждён ($url) — удаляю и пробую следующее зеркало"
-        rm -f "$TARBALL_PATH"
+        rm -f "$TARBALL_PATH" "$part"
     done
     return 1
+}
+
+# Проверить, что первые min(size, 1MiB) байта файла совпадают с эталоном
+# с официального зеркала (защита от склейки разных источников).
+_part_matches_official() {
+    local f="$1" fsz="$2" ref="${TARBALL_PATH}.ref" n
+    n=$(( fsz < 1048576 ? fsz : 1048576 ))
+    [ -s "$ref" ] || { curl -fsSL --max-time 30 -r "-$((n-1))" "${LFS_TARBALL_URLS[0]}" -o "$ref" 2>/dev/null || return 1; }
+    head -c "$n" "$f" | cmp -s - "$ref"
+}
+
+# Скачать диапазон [from .. to-1] из url и дописать в файл out.
+# Использует curl (Range), при отсутствии — wget -r + dd.
+_fetch_range() {
+    local url="$1" out="$2" from="$3" to="$4"
+    mkdir -p "$(dirname "$out")"; touch "$out"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --retry-delay 5 --speed-limit 10240 --speed-time 60 \
+             -r "${from}-$((to-1))" "$url" -o "$out.tmp" 2>>"$LOG/download.log" \
+            || return 1
+    else
+        local qs qe
+        qs=$(( from / 1048576 )); qe=$(( (to - 1) / 1048576 ))
+        wget -q -t 3 -T 60 --header="Range: bytes=${qs}-${qe}" \
+             -O "$out.qget" "$url" 2>>"$LOG/download.log" || return 1
+        dd if="$out.qget" bs=1048576 skip=$(( from - qs * 1048576 )) of="$out.tmp" status=none 2>/dev/null \
+            || { rm -f "$out.qget"; return 1; }
+        rm -f "$out.qget"
+    fi
+    cat "$out.tmp" >> "$out" && rm -f "$out.tmp"
 }
 
 # Запасной режим: поштучная загрузка архивов по списку md5sums с зеркал.
@@ -258,29 +330,50 @@ stage_prepare() {
     mkdir -p "$LFS/sources"
 
     local tarball="$LFS/$LFS_TARBALL" tarpart="$LFS/$LFS_TARBALL.part"
+    local extracted="$STAMPS/packages-extracted"
 
-    if [ "$(find "$LFS/sources" -maxdepth 1 -type f ! -name '*.part' 2>/dev/null | wc -l)" -ge 80 ]; then
+    if [ -f "$extracted" ]; then
+        ok "Пакеты уже распакованы в $LFS/sources (метка: $extracted)"
+    elif [ "$(find "$LFS/sources" -maxdepth 1 -type f ! -name '*.part' 2>/dev/null | wc -l)" -ge 80 ]; then
         ok "Пакеты уже распакованы в $LFS/sources"
     else
         # пути для download_tarball (глобальные, чтобы функция видела их)
         TARBALL_PATH="$tarball"; TARPART_PATH="$tarpart"
         if download_tarball; then
             if [ "$(find "$LFS/sources" -maxdepth 1 -type f ! -name '*.part' | wc -l)" -lt 80 ]; then
-                log "Распаковка пакетов..."
-                ( cd "$LFS" && tar xf "$tarball" ) || die "Не удалось распаковать $tarball"
-                local topdir="$LFS/lfs-packages-${LFS_VERSION}"
+                log "Распаковка пакетов... (604 МБ, займёт 1-3 минуты, прогресс не показывается)"
+                mkdir -p "$STAMPS"
+                # Распаковываем НЕ в /mnt/lfs, а во временный каталог внутри
+                # sources/.stage: если прервать Ctrl+C посреди распаковки,
+                # повторный запуск просто удалит .stage и начнёт заново.
+                local stage="$LFS/sources/.stage"
+                rm -rf "$stage"; mkdir -p "$stage"
+                tar xf "$tarball" -C "$stage" \
+                    || { rm -rf "$stage"; die "Не удалось распаковать $tarball"; }
+                local topdir="$stage/lfs-packages-${LFS_VERSION}"
                 if [ ! -d "$topdir" ]; then
                     # узнаём реальное имя корневого каталога из архива
-                    topdir="$(tar tf "$tarball" | head -1 | cut -d/ -f1)"
-                    topdir="$LFS/$topdir"
+                    topdir="$stage/$(tar tf "$tarball" | head -1 | cut -d/ -f1)"
                 fi
                 [ -d "$topdir" ] || die "В архиве нет ожидаемого каталога lfs-packages-${LFS_VERSION}"
-                mv -T "$topdir" "$LFS/sources"
-                ok "Распаковано в $LFS/sources ($(find "$LFS/sources" -maxdepth 1 -type f | wc -l) файлов)"
+                mv -t "$LFS/sources" "$topdir"/* 2>/dev/null || true
+                # скрытые файлы (если есть) + очистка
+                shopt -s dotglob nullglob
+                mv -n -t "$LFS/sources" "$topdir"/.* 2>/dev/null || true
+                shopt -u dotglob nullglob
+                rm -rf "$stage"
+                local nfiles
+                nfiles=$(find "$LFS/sources" -maxdepth 1 -type f ! -name '*.part' | wc -l)
+                [ "$nfiles" -ge 80 ] || die "После распаковки в $LFS/sources только $nfiles файлов (ожидалось >=80)"
+                touch "$extracted"
+                ok "Распаковано в $LFS/sources ($nfiles файлов)"
+            else
+                touch "$extracted"
             fi
         else
             warn "Монолитный tar недоступен или повреждён — переключаюсь на поштучную загрузку"
             fetch_per_package "$LFS/sources" || die "Не удалось получить пакеты ни одним способом"
+            touch "$extracted"
         fi
     fi
 
