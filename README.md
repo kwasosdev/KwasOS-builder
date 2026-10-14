@@ -4,7 +4,7 @@
 [![Based on LFS 13.0](https://img.shields.io/badge/LFS-13.0--systemd-orange.svg)](https://www.linuxfromscratch.org/lfs/)
 [![Kernel](https://img.shields.io/badge/Kernel-6.18.10-green.svg)](https://www.kernel.org/)
 
-**KwasOS** — кастомный Live Linux дистрибутив, собранный с нуля на базе Linux From Scratch 13.0 (systemd edition). Проект представляет собой набор скриптов и конфигураций для автоматической сборки загрузочного LiveUSB/LiveCD.
+**KwasOS** — кастомный Live Linux дистрибутив, собранный с нуля на базе Linux From Scratch 13.0 (systemd edition). Проект представляет собой набор скриптов и конфигураций для автоматической сборки загрузочного LiveUSB/LiveCD. Пишу, не доделал
 
 ## Особенности
 
@@ -142,3 +142,4 @@ GPL v3 — см. LICENSE.
 - ОГРОМНОЕ спасибо основателю Linux From Scratch - Герард Бикманс (Gerard Beekmans). За его прекрасную книгу.
 - https://github.com/luisgbm/lfs-scripts/ — помощь с первой сборкой (скрипты)
 - Сообщество LFS за бесценную документацию
+- Qwen Coder за решение багов
