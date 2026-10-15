@@ -9,7 +9,7 @@
 #  * Загрузка идёт во временный каталог на зеркало; НЕ используется wget -O
 #    вместе с -c (с -O докачка молча отключается и качает с нуля).
 #  * При обрыве связи повторный запуск продолжает загрузку с того же байта.
-#  * Прогресс wget (-nv пишет его в stderr) перенаправляется в logs/download.log.
+#  * Прогресс загрузки печатается в консоль и дублируется в logs/download.log.
 #  * После загрузки проверяются точный размер и целостность архива (tar tf);
 #    битый/неполный файл с одного зеркала -> автоматический переход на следующее.
 #  * Распаковка выполняется во временный каталог и только при успехе
@@ -58,6 +58,43 @@ init_dirs() {
 # Подготовка: скачивание и распаковка пакетов
 #------------------------------------------------------------------------------
 
+# Загрузка монолитного tar одной командой wget -c (без -O!):
+#  * wget сам докачивает с того байта, на котором произошёл обрыв;
+#  * прогресс wget пишет в stderr -> перенаправляем его в logs/download.log;
+#  * раз в несколько секунд печатаем актуальный прогресс в консоль,
+#    чтобы скрипт не выглядел «зависшим».
+# Возвращает 0, если размер файла достиг TARBALL_SIZE.
+download_with_wget() {
+    local url="$1" part="$2" pid wpid have last=0
+    ( cd "$(dirname "$part")" && \
+      wget -c --progress=dot:mega --tries=0 --timeout=60 --waitretry=15 \
+           "$url" ) >>"$LOG/download.log" 2>&1 &
+    pid=$!
+    # Дочерний монитор: печатает прогресс в stdout (консоль + tee в лог),
+    # пока wget жив. Когда wget умирает, monitor завершает цикл и выходит.
+    ( while kill -0 "$pid" 2>/dev/null; do
+          have=$(stat -c%s "$part" 2>/dev/null || echo 0)
+          if (( have != last )); then
+              printf '[%(%H:%M:%S)T] Загрузка: %s/%s байт (%d%%)\n' -1 \
+                     "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE ))
+              last=$have
+          fi
+          sleep 5
+      done ) &
+    wpid=$!
+    wait "$pid"; local rc=$?
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+    have=$(stat -c%s "$part" 2>/dev/null || echo 0)
+    if (( have >= TARBALL_SIZE )); then
+        printf '[%(%H:%M:%S)T] ✓ Загрузка завершена: %s/%s байт (100%%)\n' \
+               -1 "$have" "$TARBALL_SIZE"
+        return 0
+    fi
+    printf '[%(%H:%M:%S)T] ⏳ Остановлено на %s/%s байт (%d%%), wget rc=%s\n' \
+           -1 "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE )) "$rc"
+    return 1
+}
+
 # Целостность готового tar: точный размер + читается ли архив целиком
 check_tarball() {
     local f="$1" size
@@ -76,7 +113,7 @@ check_tarball() {
 
 # Загрузка монолитного tar с зеркал с корректной докачкой.
 download_tarball() {
-    local url urlhash partdir part got rc odd
+    local url urlhash partdir part got rc
     for url in "${LFS_TARBALL_URLS[@]}"; do
         log "Зеркало: $url"
 
@@ -88,6 +125,10 @@ download_tarball() {
         mkdir -p "$partdir"
 
         got=$(stat -c%s "$part" 2>/dev/null || echo 0)
+        if (( got > 0 )); then
+            log "Продолжаю загрузку: $got/$TARBALL_SIZE байт уже есть."
+        else
+            log "Начинаю загрузку 0/$TARBALL_SIZE байт..."
         log "Загрузка $got/$TARBALL_SIZE байт уже есть."
 
         # Если загрузка уже завершена, но проверка ещё не выполнялась
@@ -109,13 +150,14 @@ download_tarball() {
                 warn "wget завершился с ошибкой (см. $LOG/download.log)"
             fi
         fi
+        log "Подробный прогресс wget: tail -f $LOG/download.log"
 
-        # wget без -O может оставить имя вида file.tar.part.NNN — нормализуем.
-        if [[ ! -f "$part" ]]; then
-            odd=$(find "$partdir" -maxdepth 1 -name "${LFS_TARBALL}.part.*" -type f 2>/dev/null | head -n1)
-            [[ -n "$odd" ]] && mv -f "$odd" "$part"
-        fi
-        # Если остался .part от предыдущих версий wget — объединяем один раз.
+        # ВАЖНО: НЕ используем wget -O — с ним --continue молча качает с нуля.
+        # wget -c докачивает с того же байта после обрыва; прогресс печатается
+        # монитором в консоль и дублируется в logs/download.log.
+        download_with_wget "$url" "$part" | tee -a "$LOG/download.log"
+
+        # Если от предыдущих версий скрипта остался .part — объединяем один раз.
         if [[ -f "$part" && -f "$part.part" ]]; then
             cat "$part.part" >> "$part" && rm -f "$part.part"
         fi
