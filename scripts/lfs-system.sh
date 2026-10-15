@@ -13,16 +13,19 @@ begin() {
 
 	echo "[lfs-system] Starting build of $package_name at $(date)"
 
-	tar xf $package_name.$package_ext
-	cd $package_name
+	tar xf "/sources/$package_name.$package_ext" || return 1
+	cd "$package_name" || return 1
 }
 
 finish() {
 	echo "[lfs-system] Finishing build of $package_name at $(date)"
 
 	cd /sources
-	rm -rf $package_name
+	rm -rf "$package_name"
 }
+
+# Останавливаем сборку при первой же ошибке (см. комментарий в lfs-cross.sh).
+set -e
 
 cd /sources
 

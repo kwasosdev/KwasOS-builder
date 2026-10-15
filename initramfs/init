@@ -7,6 +7,10 @@ echo "=========================================="
 echo " KwasOS Live - initializing"
 echo "=========================================="
 
+# FIX: без /dev/console (created by kernel? only if CONFIG_DEVPTS and init
+#      opens it) busybox sh fails. Ensure console node exists early.
+[ -c /dev/console ] || /bin/busybox mknod /dev/console c 5 1 2>/dev/null
+
 /bin/busybox mount -t proc none /proc
 /bin/busybox mount -t sysfs none /sys
 /bin/busybox mount -t devtmpfs none /dev
@@ -43,7 +47,8 @@ done
 echo "[init] block devices:"
 ls -la /dev/sd* /dev/sr* /dev/vd* /dev/nvme* 2>/dev/null || echo "  (none)"
 
-/bin/busybox mkdir -p /mnt/root
+# FIX: /mnt/root уже создан выше (строка mkdir), повторный mkdir без -p
+#      возвращал ошибку. Убираем дубликат.
 ROOT_DEV=""
 CANDS="/dev/sr0 /dev/sda /dev/sdb /dev/vda /dev/nvme0n1 \
        /dev/sda1 /dev/sda2 /dev/sda3 /dev/sda4 \
@@ -65,16 +70,27 @@ for fs in udf iso9660 vfat ext4; do
     done
 done
 
+# Fallback: если что-то пошло не так — остаёмся в initramfs с шеллом.
+# ВАЖНО: init не должен завершаться, иначе ядро паникует
+# ("Attempted to kill init! exitcode=0x00000000").
+fallback_shell() {
+    echo "[init] falling back to busybox shell"
+    cd /
+    while true; do
+        setsid -c /bin/busybox sh </dev/console >/dev/console 2>&1 || /bin/busybox sleep 5
+    done
+}
+
 if [ -z "$ROOT_DEV" ]; then
     echo "[init] !!! filesystem.squashfs NOT FOUND !!!"
-    exec /bin/busybox sh
+    fallback_shell
 fi
 
 echo "[init] mounting squashfs..."
 /bin/busybox mkdir -p /mnt/squashfs
 if ! /bin/busybox mount -t squashfs -o loop,ro /mnt/root/filesystem.squashfs /mnt/squashfs; then
     echo "[init] !!! squashfs mount failed !!!"
-    exec /bin/busybox sh
+    fallback_shell
 fi
 
 echo "[init] setting up overlayfs..."
@@ -87,12 +103,12 @@ if ! /bin/busybox mount -t overlay overlay \
     -o lowerdir=/mnt/squashfs,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work \
     /mnt/newroot; then
     echo "[init] !!! overlay mount failed !!!"
-    exec /bin/busybox sh
+    fallback_shell
 fi
 
 if [ ! -x /mnt/newroot/usr/lib/systemd/systemd ]; then
     echo "[init] !!! systemd not found !!!"
-    exec /bin/busybox sh
+    fallback_shell
 fi
 
 echo "[init] switch_root -> systemd"
