@@ -28,13 +28,19 @@ cp /bin/busybox "$WORK_DIR/bin/busybox"
 chmod +x "$WORK_DIR/bin/busybox"
 
 # Симлинки
+# ВАЖНО: список должен покрывать ВСЕ applets, которые вызывает /init
+# (иначе busybox ругается "applet not found" и загрузка падает).
 cd "$WORK_DIR/bin"
-for cmd in sh mount umount mkdir mknod switch_root modprobe sleep echo ls; do
+for cmd in sh mount umount mkdir mknod rmdir switch_root modprobe insmod \
+           sleep echo ls cat find grep dmesg losetup pivot_root pause \
+           true false test [ expr printf; do
     ln -sf busybox "$cmd"
 done
 cd "$WORK_DIR/sbin"
 ln -sf /bin/busybox switch_root
 ln -sf /bin/busybox mdev
+ln -sf /bin/busybox modprobe
+ln -sf /bin/busybox losetup
 
 # Init-скрипт
 cp "$INITRAMFS_DIR/init" "$WORK_DIR/init"

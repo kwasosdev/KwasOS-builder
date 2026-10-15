@@ -15,20 +15,24 @@ begin() {
 
 	echo "[lfs-final] Starting build of $package_name at $(date)"
 
-	tar xf $package_name.$package_ext
-	cd $package_name
+	tar xf "/sources/$package_name.$package_ext" || return 1
+	cd "$package_name" || return 1
 }
 
 finish() {
 	echo "[lfs-final] Finishing build of $package_name at $(date)"
 
 	cd /sources
-	rm -rf $package_name
+	rm -rf "$package_name"
 }
+
+# Останавливаем сборку при первой же ошибке (см. комментарий в lfs-cross.sh).
+set -e
 
 cd /sources
 
 # 9.2. General Network Configuration (systemd-networkd)
+mkdir -pv /etc/systemd/network
 ln -sfv /dev/null /etc/systemd/network/99-default.link
 
 cat > /etc/systemd/network/10-eth-dhcp.network << "EOF"
@@ -237,9 +241,11 @@ scripts/config --enable  CONFIG_DEVTMPFS                \
                --enable  CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY \
                --enable  CONFIG_DRM                     \
                --enable  CONFIG_DRM_SIMPLEDRM           \
-               --enable  CONFIG_DRM_I915                \
-               --enable  CONFIG_DRM_AMDGPU              \
-               --enable  CONFIG_DRM_NOUVEAU
+               --module  CONFIG_DRM_I915                \
+               --module  CONFIG_DRM_AMDGPU              \
+               --module  CONFIG_DRM_NOUVEAU             \
+               --enable  CONFIG_FW_LOADER               \
+               --set-str CONFIG_EXTRA_FIRMWARE ""
 
 make olddefconfig
 make
@@ -247,6 +253,12 @@ make modules_install
 cp -iv arch/x86/boot/bzImage /boot/vmlinuz-6.18.10-lfs-13.0-systemd
 cp -iv System.map /boot/System.map-6.18.10
 cp -iv .config /boot/config-6.18.10
+# FIX: без /boot/initrd.img GRUB не может загрузиться — initramfs
+#      собирается scripts/build-initrd.sh (нужен busybox-static на хосте,
+#      /mnt/lfs смонтирован как $LFS).
+if [ ! -f "/boot/initrd.img-6.18.10" ]; then
+    bash "$(dirname "$0")/build-initrd.sh" || echo "[lfs-final] ВНИМАНИЕ: initrd не собран!"
+fi
 cp -r Documentation -T /usr/share/doc/linux-6.18.10
 finish
 
@@ -262,36 +274,10 @@ install uhci_hcd /sbin/modprobe ehci_hcd ; /sbin/modprobe -i uhci_hcd ; true
 EOF
 
 # 10.4. Using GRUB to Set Up the Boot Process
-grub-install "$GRUB_DISK"
-if [ -n "$ROOT_UUID" ] && [ -n "$ROOT_PARTUUID" ]; then
-cat > /boot/grub/grub.cfg << EOF
-# Begin /boot/grub/grub.cfg
-set default=0
-set timeout=5
-
-insmod part_msdos
-insmod ext2
-search --set=root --fs-uuid $ROOT_UUID
-
-menuentry "GNU/Linux, Linux 6.18.10-lfs-13.0-systemd" {
-        linux   /boot/vmlinuz-6.18.10-lfs-13.0-systemd root=PARTUUID=$ROOT_PARTUUID ro
-}
-EOF
-else
-cat > /boot/grub/grub.cfg << "EOF"
-# Begin /boot/grub/grub.cfg
-set default=0
-set timeout=5
-
-insmod part_msdos
-insmod ext2
-set root=(hd0,1)
-
-menuentry "GNU/Linux, Linux 6.18.10-lfs-13.0-systemd" {
-        linux   /boot/vmlinuz-6.18.10-lfs-13.0-systemd root=/dev/sda1 ro
-}
-EOF
-fi
+# FIX: Live-система не ставит GRUB в процессе сборки — загрузчик пишет
+#      стадия 'live' (configs/grub.cfg + xorriso/isohybrid). grub-install
+#      на /dev/sda срывал сборку ошибкой «не существующий диск».
+echo "[lfs-final] Пропускаю grub-install (загрузчик будет в Live ISO, см. sudo make live)"
 
 # 11.1. The End
 # FIX: релиз теперь KwasOS, а не Linux From Scratch.

@@ -239,23 +239,137 @@ stage_prepare() {
 }
 
 #------------------------------------------------------------------------------
-# Последующие стадии (заглушки для этого репозитория)
+# Запуск скриптов сборки глав LFS (5–11) с отметками о завершении
 #------------------------------------------------------------------------------
-stage_build()      { log "=== Стадия: build ===";      log "TODO: сборка LFS/chroot"; }
-stage_configure()  { log "=== Стадия: configure ===";  log "TODO: настройка системы"; }
-stage_package()    { log "=== Стадия: package ===";    log "TODO: упаковка"; }
-stage_iso()        { log "=== Стадия: iso ===";        log "TODO: создание ISO"; }
+STAMPS="$LFS/.stamps"
+
+run_stage_script() {
+    # $1 — имя стадии (cross|chroot|system|final), $2 — скрипт в scripts/
+    local name="$1" script="$BUILD_DIR/scripts/$2"
+    require_root
+    init_dirs
+    mkdir -p "$STAMPS"
+    if [[ -f "$STAMPS/$name.done" ]]; then
+        log "Стадия '$name' уже выполнена ($STAMPS/$name.done) — пропускаю."
+        log "Для пересборки: rm -f $STAMPS/$name.done (или 'sudo make clean')."
+        return 0
+    fi
+    [[ -x "$SRC" ]] || die "Каталог $SRC не найден. Сначала выполните: sudo make prepare"
+    [[ -f "$script" ]] || die "Не найден скрипт: $script"
+    log "=== Стадия: $name ($(basename "$script")) ==="
+    if bash -n "$script"; then
+        :
+    else
+        die "Синтаксическая ошибка в $script — исправьте её перед запуском"
+    fi
+    # Экспортируем переменные, которые ждут внутренние скрипты
+    export LFS LFS_TGT="${LFS_TGT:-$(uname -m)-lfs-linux-gnu}"
+    if ! bash "$script" 2>&1 | tee -a "$LOG/$name.log"; then
+        die "Стадия '$name' завершилась с ошибкой (см. $LOG/$name.log)"
+    fi
+    local rc=${PIPESTATUS[0]}
+    (( rc == 0 )) || die "Стадия '$name' завершилась с кодом $rc (см. $LOG/$name.log)"
+    touch "$STAMPS/$name.done"
+    log "✓ Стадия '$name' завершена."
+}
+
+stage_cross()   { run_stage_script cross   lfs-cross.sh; }
+stage_chroot()  { run_stage_script chroot  lfs-chroot.sh; }
+stage_system()  { run_stage_script system  lfs-system.sh; }
+stage_final()   { run_stage_script final   lfs-final.sh; }
+
+#------------------------------------------------------------------------------
+# Стадия live: initrd + squashfs из /mnt/lfs + гибридный ISO
+#------------------------------------------------------------------------------
+KERNEL_VER="6.18.10"
+VMLINUZ_NAME="vmlinuz-${KERNEL_VER}-lfs-13.0-systemd"
+INITRD_NAME="initrd.img-${KERNEL_VER}"
+
+stage_live() {
+    require_root
+    log "=== Стадия: live ==="
+    local iso_root="$BUILD_DIR/build/iso" out_iso="$BUILD_DIR/build/kwasos-${VERSION:-1.0}.iso"
+    local lfs_boot="$LFS/boot"
+
+    [[ -f "$lfs_boot/$VMLINUZ_NAME" ]] || die "Нет ядра $lfs_boot/$VMLINUZ_NAME. Выполните: sudo make final"
+
+    # 1. initrd
+    bash "$BUILD_DIR/scripts/build-initrd.sh" || die "Не удалось собрать initrd (нужен busybox-static)"
+
+    # 2. squashfs из корневой ФС LFS
+    log "Упаковка корневой ФС в squashfs..."
+    rm -rf "$iso_root"
+    mkdir -p "$iso_root/boot"
+    mksquashfs "$LFS" "$iso_root/filesystem.squashfs" \
+        -e boot .stamps sources proc sys dev run tmp \
+        -comp xz -noappend || die "mksquashfs завершился с ошибкой"
+
+    # 3. загрузочные файлы
+    cp "$lfs_boot/$VMLINUZ_NAME"  "$iso_root/boot/"
+    cp "$lfs_boot/$INITRD_NAME"   "$iso_root/boot/"
+    mkdir -p "$iso_root/boot/grub"
+    cp "$BUILD_DIR/configs/grub.cfg" "$iso_root/boot/grub/grub.cfg"
+
+    # 4. гибридный ISO (BIOS + UEFI)
+    log "Сборка ISO: $out_iso"
+    mkdir -p "$BUILD_DIR/build"
+    local grub_efi_img="$BUILD_DIR/build/boot.img-efi-fat-no-part.bin"
+    if command -v grub-mkimage >/dev/null 2>&1; then
+        ( cd "$iso_root" && \
+          grub-mkstandalone -O x86_64-efi -d /usr/lib/grub/x86_64-efi \
+              -o "$grub_efi_img" "boot/grub/grub.cfg=$BUILD_DIR/configs/grub.cfg" ) \
+            || warn "grub-mkstandalone (UEFI) не удался — BIOS-загрузка всё равно будет работать"
+    fi
+    xorriso -as mkisofs -o "$out_iso" \
+        -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin 2>/dev/null \
+        -V "KWASOS_1_0" \
+        -b isolinux.bin -c boot.cat -no-emul-boot -boot-load-size 4 -boot-info-table \
+        --efi-boot "$grub_efi_img" -no-emul-boot \
+        -isohybrid-gpt-basdat \
+        -r -J "$iso_root" >>"$LOG/download.log" 2>&1 \
+        || die "xorriso не смог собрать ISO (проверьте установку xorriso/grub-pc-bin/grub-efi-amd64-bin)"
+
+    sha256sum "$out_iso" > "$out_iso.sha256"
+    log "✓ Готово: $out_iso ($(du -h "$out_iso" | cut -f1))"
+}
+
+usage() {
+    cat << 'EOF'
+KwasOS builder — оркестратор сборки LFS 13.0 → Live ISO
+
+Использование: sudo make <цель>   (или bash scripts/build.sh <стадия>)
+
+Стадии:
+  prepare   Скачать пакеты LFS и распаковать в $LFS/sources
+  cross     Кросс-тулчейн и временные инструменты (главы 5–6)
+  chroot    Дополнительные временные инструменты (глава 7, внутри chroot)
+  system    Базовая система (глава 8, внутри chroot)
+  final     Ядро + финальная настройка (главы 9–11)
+  live      initrd + squashfs + гибридный ISO (build/kwasos-<VERSION>.iso)
+  all       Все стадии по порядку
+
+Переменные окружения:
+  LFS=/mnt/lfs   VERSION=1.0
+EOF
+}
 
 main() {
-    local stage="${1:-prepare}"
+    local stage="${1:-help}"
     case "$stage" in
+        help|-h|--help) usage ;;
         prepare)     stage_prepare ;;
-        build)       stage_build ;;
-        configure)   stage_configure ;;
-        package)     stage_package ;;
-        iso)         stage_iso ;;
-        all)         stage_prepare && stage_build && stage_configure && stage_package && stage_iso ;;
-        *)           die "Неизвестная стадия: $stage (prepare|build|configure|package|iso|all)" ;;
+        cross)       stage_cross ;;
+        chroot)      stage_chroot ;;
+        system)      stage_system ;;
+        final)       stage_final ;;
+        live)        stage_live ;;
+        # обратная совместимость со старыми именами стадий
+        build)       stage_cross && stage_chroot ;;
+        configure)   stage_system ;;
+        package)     stage_final ;;
+        iso)         stage_live ;;
+        all)         stage_prepare && stage_cross && stage_chroot && stage_system && stage_final && stage_live ;;
+        *)           usage; die "Неизвестная стадия: $stage (prepare|cross|chroot|system|final|live|all)" ;;
     esac
 }
 
