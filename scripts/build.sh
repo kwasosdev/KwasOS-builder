@@ -89,17 +89,25 @@ download_tarball() {
 
         got=$(stat -c%s "$part" 2>/dev/null || echo 0)
         log "Загрузка $got/$TARBALL_SIZE байт уже есть."
-        log "Прогресс в реальном времени: tail -f $LOG/download.log"
 
-        # ВАЖНО: НЕ используем -O — с ним --continue молча качает с нуля.
-        # wget запускается из partdir и пишет в ./$LFS_TARBALL(.part).
-        # Прогресс (-nv пишет его в STDERR!) перенаправляем именно так:
-        # stdout+stderr -> logs/download.log.
-        if ! ( cd "$partdir" && \
-               wget -c -nv --progress=dot:mega --tries=10 \
-                    --timeout=60 --waitretry=15 \
-                    --user-agent="wget" "$url" ) >>"$LOG/download.log" 2>&1; then
-            warn "wget завершился с ошибкой (см. $LOG/download.log)"
+        # Если загрузка уже завершена, но проверка ещё не выполнялась
+        # (например, прошлый запуск прервали Ctrl+C сразу после wget),
+        # сразу переходим к проверке целостности.
+        if (( got == TARBALL_SIZE )); then
+            log "Файл уже загружен полностью, проверяю целостность..."
+        else
+            log "Прогресс в реальном времени: tail -f $LOG/download.log"
+
+            # ВАЖНО: НЕ используем -O — с ним --continue молча качает с нуля.
+            # wget запускается из partdir и пишет в ./$LFS_TARBALL(.part).
+            # Прогресс (-nv пишет его в STDERR!) перенаправляем именно так:
+            # stdout+stderr -> logs/download.log.
+            if ! ( cd "$partdir" && \
+                   wget -c -nv --progress=dot:mega --tries=10 \
+                        --timeout=60 --waitretry=15 \
+                        --user-agent="wget" "$url" ) >>"$LOG/download.log" 2>&1; then
+                warn "wget завершился с ошибкой (см. $LOG/download.log)"
+            fi
         fi
 
         # wget без -O может оставить имя вида file.tar.part.NNN — нормализуем.
