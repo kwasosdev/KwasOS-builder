@@ -37,7 +37,7 @@ cd "$SRC_DIR"
 
 # 5.2. Binutils-2.46.0 - Pass 1
 begin binutils-2.46.0 tar.xz
-mkdir -v build
+mkdir -p build
 cd       build
 ../configure --prefix=$LFS/tools \
              --with-sysroot=$LFS \
@@ -65,7 +65,7 @@ case $(uname -m) in
         -i.orig gcc/config/i386/t-linux64
  ;;
 esac
-mkdir -v build
+mkdir -p build
 cd       build
 ../configure                  \
     --target=$LFS_TGT         \
@@ -115,7 +115,7 @@ case $(uname -m) in
     ;;
 esac
 patch -Np1 -i ../glibc-fhs-1.patch
-mkdir -v build
+mkdir -p build
 cd       build
 echo "rootsbindir=/usr/sbin" > configparms
 ../configure                             \
@@ -135,7 +135,7 @@ finish
 
 # 5.6. Libstdc++ from GCC-15.2.0
 begin gcc-15.2.0 tar.xz
-mkdir -v build
+mkdir -p build
 cd       build
 ../libstdc++-v3/configure      \
     --host=$LFS_TGT            \
@@ -326,7 +326,7 @@ finish
 # 6.17. Binutils-2.46.0 - Pass 2
 begin binutils-2.46.0 tar.xz
 sed '6031s/$add_dir//' -i ltmain.sh
-mkdir -v build
+mkdir -p build
 cd       build
 ../configure                   \
     --prefix=/usr              \
@@ -360,7 +360,7 @@ case $(uname -m) in
 esac
 sed '/thread_header =/s/@.*@/gthr-posix.h/' \
     -i libgcc/Makefile.in libstdc++-v3/include/Makefile.in
-mkdir -v build
+mkdir -p build
 cd       build
 ../configure                   \
     --build=$(../config.guess) \
