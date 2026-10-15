@@ -50,7 +50,7 @@ require_root() {
 
 check_host_deps() {
     local missing=()
-    for cmd in wget tar make gcc g++ patch sed awk bison flex texinfo python3 xz; do
+        for cmd in wget tar make gcc g++ patch sed awk bison flex makeinfo python3 xz; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     if (( ${#missing[@]} > 0 )); then
