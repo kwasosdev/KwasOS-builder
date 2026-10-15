@@ -41,14 +41,14 @@ Ubuntu/Debian:
 sudo apt update
 sudo apt install -y build-essential bison gawk texinfo python3 wget \
     xz-utils squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin \
-    mtools cpio
+    mtools cpio flex texinfo
 ```
 
 Arch:
 
 ```bash
 sudo pacman -S --needed base-devel wget xz squashfs-tools xorriso \
-    grub mtools cpio
+    grub mtools cpio flex texinfo
 ```
 
 ### 3. Запустить сборку
