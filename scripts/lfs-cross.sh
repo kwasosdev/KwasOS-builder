@@ -4,6 +4,13 @@
 # by Luís Mendes :)
 # Updated for LFS 13.0
 
+set -e
+
+export LFS="${LFS:-/mnt/lfs}"
+export LFS_TGT="${LFS_TGT:-$(uname -m)-lfs-linux-gnu}"
+export SRC_DIR="${SRC_DIR:-$LFS/sources}"
+export PATH="$LFS/tools/bin:$PATH"
+
 package_name=""
 package_ext=""
 
@@ -24,15 +31,7 @@ finish() {
 	rm -rf "$package_name"
 }
 
-# Останавливаем сборку при первой же ошибке (раньше скрипт «падал молча»,
-# а make всё равно возвращал 0 и следующие стадии шли по битой системе).
-set -e
-
-SRC_DIR="${LFS:-/mnt/lfs}/sources"
-LFS_TGT="${LFS_TGT:-$(uname -m)-lfs-linux-gnu}"
-export LFS_TGT
-
-mkdir -p "$LFS/usr/share/man" "$LFS/tools"   # ln/mv внутри шагов не падали на пустом дереве
+mkdir -p "$LFS/usr/share/man" "$LFS/tools" "$LFS/tools/bin"
 cd "$SRC_DIR"
 
 # 5.2. Binutils-2.46.0 - Pass 1
@@ -90,8 +89,25 @@ cd       build
 make
 make install
 cd ..
-cat gcc/limitx.h gcc/glimits.h gcc/limity.h > \
-  `dirname $($LFS_TGT-gcc -print-libgcc-file-name)`/include/limits.h
+
+# Генерация limits.h с проверками: компилятор и libgcc.a должны существовать
+if ! command -v "$LFS_TGT-gcc" >/dev/null 2>&1; then
+	echo "[lfs-cross] ERROR: $LFS_TGT-gcc не найден в PATH. Похоже, GCC Pass 1 не установлен." >&2
+	exit 1
+fi
+
+libgcc_file="$("$LFS_TGT-gcc" -print-libgcc-file-name 2>/dev/null || true)"
+
+if [ -z "$libgcc_file" ] || [ ! -f "$libgcc_file" ]; then
+	echo "[lfs-cross] ERROR: не найден libgcc.a для $LFS_TGT (получено: '$libgcc_file')" >&2
+	exit 1
+fi
+
+libgcc_include_dir="$(dirname "$libgcc_file")/include"
+mkdir -p "$libgcc_include_dir"
+
+cat gcc/limitx.h gcc/glimits.h gcc/limity.h > "$libgcc_include_dir/limits.h"
+
 finish
 
 # 5.4. Linux-6.18.10 API Headers
@@ -161,7 +177,7 @@ finish
 
 # 6.3. Ncurses-6.6
 begin ncurses-6.6 tar.gz
-mkdir build
+mkdir -p build
 pushd build
   ../configure --prefix=$LFS/tools AWK=gawk
   make -C include
@@ -225,7 +241,7 @@ finish
 
 # 6.7. File-5.46
 begin file-5.46 tar.gz
-mkdir build
+mkdir -p build
 pushd build
   ../configure --disable-bzlib      \
                --disable-libseccomp \
