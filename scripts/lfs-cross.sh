@@ -3,35 +3,256 @@
 # Builds the cross-toolchain and cross compiling temporary tools from chapters 5 and 6
 # by Luís Mendes :)
 # Updated for LFS 13.0
+#
+# Автономный вариант: сам скачивает и распаковывает пакеты LFS,
+# проверяет зависимости хоста и не требует предварительного `make prepare`.
+#
+# Запуск: sudo ./scripts/lfs-cross.sh
 
 set -e
 
+# --- Самонастройка окружения ---
 export LFS="${LFS:-/mnt/lfs}"
 export LFS_TGT="${LFS_TGT:-$(uname -m)-lfs-linux-gnu}"
 export SRC_DIR="${SRC_DIR:-$LFS/sources}"
 export PATH="$LFS/tools/bin:$PATH"
 
+# --- Параметры загрузки пакетов ---
+LFS_VERSION="13.0"
+TARBALL_SIZE=633282560
+LFS_TARBALL="lfs-packages-${LFS_VERSION}.tar"
+LFS_TARBALL_URLS=(
+    "http://ftp.osuosl.org/pub/lfs/lfs-packages/${LFS_TARBALL}"
+    "https://anduin.linuxfromscratch.org/LFS/${LFS_TARBALL}"
+    "http://mirrors.lfs-matrix.net/pub/lfs/lfs-packages/${LFS_TARBALL}"
+)
+MD5SUMS_URLS=(
+    "http://ftp.osuosl.org/pub/lfs/lfs-packages/${LFS_VERSION}/md5sums"
+    "https://anduin.linuxfromscratch.org/LFS/${LFS_VERSION}-packages.md5"
+)
+
+# --- Каталоги ---
+LOG_DIR="${LOG_DIR:-$(cd "$(dirname "$0")/.." && pwd)/logs}"
+mkdir -p "$LOG_DIR"
+DOWNLOAD_LOG="$LOG_DIR/download.log"
+
 package_name=""
 package_ext=""
 
+# --- Служебные функции ---
+log() { printf '[%(%H:%M:%S)T] %s\n' -1 "$*"; }
+warn() { printf '[%(%H:%M:%S)T] ПРЕДУПРЕЖДЕНИЕ: %s\n' -1 "$*" >&2; }
+die() { printf '[%(%H:%M:%S)T] ОШИБКА: %s\n' -1 "$*" >&2; exit 1; }
+
+require_root() {
+    [[ $EUID -eq 0 ]] || die "Запускайте через sudo."
+}
+
+check_host_deps() {
+    local missing=()
+    for cmd in wget tar make gcc g++ patch sed awk bison flex texinfo python3 xz; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        die "Не найдены утилиты: ${missing[*]}. Установите их перед запуском."
+    fi
+}
+
+init_dirs() {
+    mkdir -p "$LFS" "$SRC_DIR" "$LOG_DIR" "$LFS/tools" "$LFS/tools/bin" "$LFS/usr/share/man"
+}
+
+# --- Загрузка и распаковка пакетов LFS (аналог stage_prepare из build.sh) ---
+download_with_wget() {
+    local url="$1" part="$2" pid wpid have last=0
+    ( cd "$(dirname "$part")" && \
+      wget -c --progress=dot:mega --tries=0 --timeout=60 --waitretry=15 \
+           "$url" ) >>"$DOWNLOAD_LOG" 2>&1 &
+    pid=$!
+    ( while kill -0 "$pid" 2>/dev/null; do
+        have=$(stat -c%s "$part" 2>/dev/null || echo 0)
+        if (( have != last )); then
+            printf '[%(%H:%M:%S)T] Загрузка: %s/%s байт (%d%%)\n' -1 \
+                "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE ))
+            last=$have
+        fi
+        sleep 5
+      done ) &
+    wpid=$!
+    wait "$pid"; local rc=$?
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+    have=$(stat -c%s "$part" 2>/dev/null || echo 0)
+    if (( have >= TARBALL_SIZE )); then
+        printf '[%(%H:%M:%S)T] ✓ Загрузка завершена: %s/%s байт (100%%)\n' -1 \
+            "$have" "$TARBALL_SIZE"
+        return 0
+    fi
+    printf '[%(%H:%M:%S)T] ⏳ Остановлено на %s/%s байт (%d%%), wget rc=%s\n' -1 \
+        "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE )) "$rc"
+    return 1
+}
+
+check_tarball() {
+    local f="$1" size
+    [[ -f "$f" ]] || return 1
+    size=$(stat -c%s "$f")
+    if (( size != TARBALL_SIZE )); then
+        warn "Размер $f = $size, ожидалось $TARBALL_SIZE"
+        return 1
+    fi
+    if ! tar tf "$f" >/dev/null 2>&1; then
+        warn "Архив $f повреждён (tar tf не проходит)"
+        return 1
+    fi
+    return 0
+}
+
+download_tarball() {
+    local url urlhash partdir part got rc
+    for url in "${LFS_TARBALL_URLS[@]}"; do
+        log "Зеркало: $url"
+        urlhash=$(printf '%s' "$url" | md5sum | cut -c1-8)
+        partdir="$LFS/.dl-$urlhash"
+        part="$partdir/$LFS_TARBALL"
+        mkdir -p "$partdir"
+        got=$(stat -c%s "$part" 2>/dev/null || echo 0)
+        if (( got >= TARBALL_SIZE )); then
+            log "Файл уже загружен полностью ($got/$TARBALL_SIZE байт), проверяю целостность..."
+        elif (( got > 0 )); then
+            log "Продолжаю загрузку: $got/$TARBALL_SIZE байт уже есть."
+            log "Прогресс в реальном времени: tail -f $DOWNLOAD_LOG"
+            download_with_wget "$url" "$part" | tee -a "$DOWNLOAD_LOG"
+            rc=$?
+        else
+            log "Начинаю загрузку 0/$TARBALL_SIZE байт..."
+            log "Прогресс в реальном времени: tail -f $DOWNLOAD_LOG"
+            download_with_wget "$url" "$part" | tee -a "$DOWNLOAD_LOG"
+            rc=$?
+        fi
+        if [[ -f "$part" && -f "$part.part" ]]; then
+            cat "$part.part" >> "$part" && rm -f "$part.part"
+        fi
+        if check_tarball "$part"; then
+            mv -f "$part" "$SRC_DIR/$LFS_TARBALL"
+            rm -rf "$partdir"
+            log "✓ Архив скачан и проверен ($(du -h "$SRC_DIR/$LFS_TARBALL" | cut -f1))"
+            return 0
+        fi
+        got=$(stat -c%s "$part" 2>/dev/null || echo 0)
+        if (( got > 0 && got < TARBALL_SIZE )); then
+            warn "Загрузка прервана на ${got}/${TARBALL_SIZE} байт (wget rc=${rc:-0})."
+            warn "Повторите запуск — продолжит с этого места."
+            return 1
+        fi
+        warn "Файл с $url непригоден, пробую следующее зеркало..."
+        rm -f "$part" "$part".part
+    done
+    return 1
+}
+
+fetch_per_package() {
+    local md5file base name sum u ok=0 fail=0
+    md5file="$SRC_DIR/md5sums"
+    if [[ ! -s "$md5file" ]]; then
+        for u in "${MD5SUMS_URLS[@]}"; do
+            if wget -c -nv -O "$md5file.tmp" "$u" >>"$DOWNLOAD_LOG" 2>&1; then
+                mv -f "$md5file.tmp" "$md5file"; break
+            fi
+            rm -f "$md5file.tmp"
+        done
+    fi
+    [[ -s "$md5file" ]] || { warn "Не получен список md5sums"; return 1; }
+    base="http://ftp.osuosl.org/pub/lfs/lfs-packages/${LFS_VERSION}"
+    while read -r sum name _; do
+        [[ -z "${name:-}" ]] && continue
+        if [[ -f "$SRC_DIR/$name" ]] && echo "$sum $SRC_DIR/$name" | md5sum -c --status - 2>/dev/null; then
+            ok=$((ok+1)); continue
+        fi
+        if wget -c -nv -O "$SRC_DIR/$name" "$base/$name" >>"$DOWNLOAD_LOG" 2>&1 \
+           && echo "$sum $SRC_DIR/$name" | md5sum -c --status - 2>/dev/null; then
+            ok=$((ok+1))
+        else
+            warn "Пакет $name не удалось получить/проверить"
+            fail=$((fail+1))
+        fi
+    done < "$md5file"
+    log "Поштучно: ок=$ok, ошибок=$fail"
+    (( fail == 0 ))
+}
+
+prepare_packages() {
+    if [[ -f "$SRC_DIR/.unpack-done" ]]; then
+        log "Пакеты уже распакованы ($SRC_DIR/.unpack-done) — пропускаю."
+        return 0
+    fi
+    local nfiles
+    nfiles=$(find "$SRC_DIR" -maxdepth 1 -type f 2>/dev/null | wc -l)
+    if (( nfiles >= 80 )); then
+        touch "$SRC_DIR/.unpack-done"
+        log "В $SRC_DIR уже $nfiles файлов — считаю распакованным, пропускаю."
+        return 0
+    fi
+    if ! check_tarball "$SRC_DIR/$LFS_TARBALL"; then
+        rm -f "$SRC_DIR/$LFS_TARBALL"
+        log "Скачивание пакетов LFS $LFS_VERSION (~633 МБ)..."
+        if ! download_tarball; then
+            warn "Переключаюсь на поштучную загрузку пакетов..."
+            fetch_per_package || die "Не удалось получить пакеты LFS."
+            touch "$SRC_DIR/.unpack-done"
+            log "✓ Пакеты готовы (поштучный режим)."
+            return 0
+        fi
+    else
+        log "✓ Архив уже скачан и цел ($SRC_DIR/$LFS_TARBALL), пропущено."
+    fi
+    log "Распаковка пакетов (~633 МБ, обычно 1–3 минуты, зависит от диска)..."
+    local tmpd root real
+    tmpd="$LFS/.unpack-tmp"
+    rm -rf "$tmpd"; mkdir -p "$tmpd"
+    if ! tar xf "$SRC_DIR/$LFS_TARBALL" -C "$tmpd"; then
+        rm -rf "$tmpd"
+        die "Распаковка $SRC_DIR/$LFS_TARBALL завершилась с ошибкой (нехватка места?)"
+    fi
+    root="$tmpd/lfs-packages-${LFS_VERSION}"
+    if [[ ! -d "$root" ]]; then
+        real=$(tar tf "$SRC_DIR/$LFS_TARBALL" 2>/dev/null | head -n1 | cut -d/ -f1)
+        if [[ -n "$real" && -d "$tmpd/$real" ]]; then
+            root="$tmpd/$real"
+        else
+            root="$tmpd"
+        fi
+    fi
+    [[ -d "$root" ]] || { rm -rf "$tmpd"; die "Не найден корневой каталог распакованного архива"; }
+    if [[ "$root" == "$tmpd" ]]; then
+        cp -a "$tmpd"/. "$SRC_DIR"/
+    else
+        cp -a "$root"/. "$SRC_DIR"/
+    fi
+    rm -rf "$tmpd"
+    touch "$SRC_DIR/.unpack-done"
+    log "✓ Распаковано в $SRC_DIR ($(find "$SRC_DIR" -maxdepth 1 -type f | wc -l) файлов)."
+}
+
+# --- Функции сборки (begin / finish) ---
 begin() {
-	package_name=$1
-	package_ext=$2
-
-	echo "[lfs-cross] Starting build of $package_name at $(date)"
-
-	tar xf "$SRC_DIR/$package_name.$package_ext" || return 1
-	cd "$package_name" || return 1
+    package_name=$1
+    package_ext=$2
+    echo "[lfs-cross] Starting build of $package_name at $(date)"
+    tar xf "$SRC_DIR/$package_name.$package_ext" || return 1
+    cd "$package_name" || return 1
 }
 
 finish() {
-	echo "[lfs-cross] Finishing build of $package_name at $(date)"
-
-	cd "$SRC_DIR"
-	rm -rf "$package_name"
+    echo "[lfs-cross] Finishing build of $package_name at $(date)"
+    cd "$SRC_DIR"
+    rm -rf "$package_name"
 }
 
-mkdir -p "$LFS/usr/share/man" "$LFS/tools" "$LFS/tools/bin"
+# --- Основной блок ---
+require_root
+check_host_deps
+init_dirs
+prepare_packages
 cd "$SRC_DIR"
 
 # 5.2. Binutils-2.46.0 - Pass 1
@@ -90,24 +311,19 @@ make
 make install
 cd ..
 
-# Генерация limits.h с проверками: компилятор и libgcc.a должны существовать
+# Генерация limits.h с проверками
 if ! command -v "$LFS_TGT-gcc" >/dev/null 2>&1; then
-	echo "[lfs-cross] ERROR: $LFS_TGT-gcc не найден в PATH. Похоже, GCC Pass 1 не установлен." >&2
-	exit 1
+    echo "[lfs-cross] ERROR: $LFS_TGT-gcc не найден в PATH. Похоже, GCC Pass 1 не установлен." >&2
+    exit 1
 fi
-
 libgcc_file="$("$LFS_TGT-gcc" -print-libgcc-file-name 2>/dev/null || true)"
-
 if [ -z "$libgcc_file" ] || [ ! -f "$libgcc_file" ]; then
-	echo "[lfs-cross] ERROR: не найден libgcc.a для $LFS_TGT (получено: '$libgcc_file')" >&2
-	exit 1
+    echo "[lfs-cross] ERROR: не найден libgcc.a для $LFS_TGT (получено: '$libgcc_file')" >&2
+    exit 1
 fi
-
 libgcc_include_dir="$(dirname "$libgcc_file")/include"
 mkdir -p "$libgcc_include_dir"
-
 cat gcc/limitx.h gcc/glimits.h gcc/limity.h > "$libgcc_include_dir/limits.h"
-
 finish
 
 # 5.4. Linux-6.18.10 API Headers
@@ -115,8 +331,6 @@ begin linux-6.18.10 tar.xz
 make mrproper
 make headers
 find usr/include -type f ! -name '*.h' -delete
-# FIX: заголовки ИДУТ В СИСТРООТ кросс-компилятора ($LFS), иначе
-# LFS_TGT-gcc не находит linux/*.h и сборка glibc падает.
 mkdir -p "$LFS/usr"
 cp -rv usr/include "$LFS/usr"
 finish
