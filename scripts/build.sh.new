@@ -1,0 +1,732 @@
+#!/usr/bin/env bash
+#==============================================================================
+# KwasOS-builder — скрипт подготовки и сборки LFS 13.0
+#
+# Стадии: prepare | build | configure | package | iso | all
+#
+# Особенности стадии prepare:
+#  * Скачивается МОНОЛИТНЫЙ tar со всеми пакетами LFS (~633 МБ), как в оригинале.
+#  * Загрузка идёт во временный каталог на зеркало; НЕ используется wget -O
+#    вместе с -c (с -O докачка молча отключается и качает с нуля).
+#  * При обрыве связи повторный запуск продолжает загрузку с того же байта.
+#  * Прогресс загрузки печатается в консоль и дублируется в logs/download.log.
+#  * После загрузки проверяются точный размер и целостность архива (tar tf);
+#    битый/неполный файл с одного зеркала -> автоматический переход на следующее.
+#  * Распаковка выполняется во временный каталог и только при успехе
+#    перемещается в /mnt/lfs/sources (защита от «огрызков» при Ctrl+C).
+#  * Повторные запуски дешёвые: готовый tar переиспользуется, распаковка
+#    помечается отметкой .unpack-done и пропускается.
+#==============================================================================
+set -u
+
+LFS="${LFS:-/mnt/lfs}"
+SRC="$LFS/sources"
+LOG="$(cd "$(dirname "$0")/.." && pwd)/logs"
+BUILD_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+
+LFS_VERSION="13.0"
+TARBALL_SIZE=633282560   # точный Content-Length lfs-packages-13.0.tar
+LFS_TARBALL="lfs-packages-13.0.tar"
+LFS_TARBALL_URLS=(
+    "http://ftp.osuosl.org/pub/lfs/lfs-packages/${LFS_TARBALL}"
+    "https://anduin.linuxfromscratch.org/LFS/${LFS_TARBALL}"
+    "http://mirrors.lfs-matrix.net/pub/lfs/lfs-packages/${LFS_TARBALL}"
+)
+# Запасной режим: поштучная докачка пакетов по списку md5sums
+MD5SUMS_URLS=(
+    "http://ftp.osuosl.org/pub/lfs/lfs-packages/${LFS_VERSION}/md5sums"
+    "https://anduin.linuxfromscratch.org/LFS/${LFS_VERSION}-packages.md5"
+)
+
+#------------------------------------------------------------------------------
+# Служебные функции
+#------------------------------------------------------------------------------
+log()  { printf '[%(%H:%M:%S)T] %s\n' -1 "$*"; }
+warn() { printf '[%(%H:%M:%S)T] ПРЕДУПРЕЖДЕНИЕ: %s\n' -1 "$*" >&2; }
+die()  { printf '[%(%H:%M:%S)T] ОШИБКА: %s\n' -1 "$*" >&2; exit 1; }
+
+require_root() {
+    [[ $EUID -eq 0 ]] || die "Запускайте через sudo make ..."
+}
+
+init_dirs() {
+    mkdir -p "$LFS" "$SRC" "$LOG"
+    chmod a+wt "$LFS" 2>/dev/null || true
+}
+
+#------------------------------------------------------------------------------
+# Подготовка: скачивание и распаковка пакетов
+#------------------------------------------------------------------------------
+
+
+
+check_deps() {
+    local missing=()
+    for cmd in wget tar xz curl mksquashfs xorriso grub-mkrescue cpio nproc; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        err "Отсутствуют утилиты: ${missing[*]}"
+        err "Установите: sudo apt install build-essential wget xz-utils \\"
+        err "              squashfs-tools xorriso grub-pc-bin grub-efi-amd64-bin \\"
+        err "              mtools cpio busybox-static"
+        exit 1
+    fi
+    [ -f /bin/busybox ] || die "busybox-static не установлен (apt install busybox-static)"
+    file /bin/busybox | grep -q "statically linked" || die "/bin/busybox не статический"
+}
+
+# Проверить, выполнена ли стадия (по маркеру)
+stage_done()  { [ -f "$STAMPS/$1.done" ]; }
+mark_done()   { mkdir -p "$STAMPS"; touch "$STAMPS/$1.done"; }
+
+# Выполнить стадию, если не сделана
+run_stage() {
+    local name="$1"; shift
+    if stage_done "$name" && [ "${FORCE:-0}" != "1" ]; then
+        ok "Стадия '$name' уже выполнена (пропускаем)"
+        return 0
+    fi
+    log "=== Стадия: $name ==="
+    "$@"
+    mark_done "$name"
+    ok "Стадия '$name' завершена"
+}
+
+# Отмонтировать всё в $LFS
+unmount_all() {
+    for m in dev/pts dev/shm dev proc sys run tmp; do
+        if mountpoint -q "$LFS/$m" 2>/dev/null; then
+            umount "$LFS/$m" 2>/dev/null || true
+        fi
+    done
+}
+
+# Исправить владельца tools/usr/etc/var (частая проблема после cross)
+fix_ownership() {
+    local owner="$1"
+    chown -R "$owner:$owner" "$LFS/tools" 2>/dev/null || true
+    chown -R "$owner:$owner" "$LFS/usr"  2>/dev/null || true
+    chown -R "$owner:$owner" "$LFS/var"  2>/dev/null || true
+    chown -R "$owner:$owner" "$LFS/etc"  2>/dev/null || true
+    chown -R "$owner:$owner" "$LFS/lib64" 2>/dev/null || true
+}
+
+# ============================================================
+# ЭТАП 1 — PREPARE
+# ============================================================
+
+# Скачать монолитный tar lfs-packages-<ver>.tar (основной источник пакетов).
+# Возвращает 0, если полный валидный tar лежит в $LFS/$LFS_TARBALL.
+# Скачивание идёт во временный файл .part с --continue: при обрыве связи
+# загрузка продолжается с того же места при следующем запуске.
+# ============================================================
+# ЭТАП 1 — PREPARE (функции загрузки/проверки)
+# ============================================================
+download_with_wget() {
+    local url="$1" part="$2" pid wpid have last=0
+    ( cd "$(dirname "$part")" && \
+      wget -c --progress=dot:mega --tries=0 --timeout=60 --waitretry=15 \
+           "$url" ) >>"$LOG/download.log" 2>&1 &
+    pid=$!
+    # Дочерний монитор: печатает прогресс в stdout (консоль + tee в лог),
+    # пока wget жив. Когда wget умирает, monitor завершает цикл и выходит.
+    ( while kill -0 "$pid" 2>/dev/null; do
+          have=$(stat -c%s "$part" 2>/dev/null || echo 0)
+          if (( have != last )); then
+              printf '[%(%H:%M:%S)T] Загрузка: %s/%s байт (%d%%)\n' -1 \
+                     "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE ))
+              last=$have
+          fi
+          sleep 5
+      done ) &
+    wpid=$!
+    wait "$pid"; local rc=$?
+    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+    have=$(stat -c%s "$part" 2>/dev/null || echo 0)
+    if (( have >= TARBALL_SIZE )); then
+        printf '[%(%H:%M:%S)T] ✓ Загрузка завершена: %s/%s байт (100%%)\n' \
+               -1 "$have" "$TARBALL_SIZE"
+        return 0
+    fi
+    printf '[%(%H:%M:%S)T] ⏳ Остановлено на %s/%s байт (%d%%), wget rc=%s\n' \
+           -1 "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE )) "$rc"
+    return 1
+}
+
+# Целостность готового tar: точный размер + читается ли архив целиком
+check_tarball() {
+    local f="$1" size
+    [[ -f "$f" ]] || return 1
+    size=$(stat -c%s "$f")
+    if (( size != TARBALL_SIZE )); then
+        warn "Размер $f = $size, ожидалось $TARBALL_SIZE"
+        return 1
+    fi
+    if ! tar tf "$f" >/dev/null 2>&1; then
+        warn "Архив $f повреждён (tar tf не проходит)"
+        return 1
+    fi
+    return 0
+}
+
+# Загрузка монолитного tar с зеркал с корректной докачкой.
+
+download_tarball() {
+    local url size havesize wantsize
+    # уже скачан и цел?
+    if [ -f "$TARBALL_PATH" ] && [ "$(stat -c%s "$TARBALL_PATH")" -eq "$TARBALL_SIZE" ] \
+       && tar tf "$TARBALL_PATH" >/dev/null 2>&1; then
+        ok "Архив $LFS_TARBALL уже на месте ($(du -h "$TARBALL_PATH" | cut -f1))"
+        return 0
+    fi
+    log "Скачивание пакетов LFS $LFS_VERSION (~633 МБ)..."
+    for url in "${LFS_TARBALL_URLS[@]}"; do
+        log "Зеркало: $url"
+        # ВАЖНО: не используем wget --continue/-O — с -O докачка молча
+        # перезаписывала файл с нуля, а --continue к чужому .part от другого
+        # зеркала мог привести к смешиванию байтов из разных источников.
+        # Вместо этого: полная загрузка файла в зеркалоспецифичный .part
+        # (атомарно через временный файл wget), проверка размера, затем
+        # дозакачка недостающих байтов диапазоном HTTP (curl -C / dd+Range).
+        local part="${TARPART_PATH}.$(printf '%s' "$url" | md5sum | cut -c1-8)"
+        while :; do
+            # 1) сколько уже скачано с ЭТОГО зеркала
+            havesize=$(stat -c%s "$part" 2>/dev/null || echo 0)
+            # 2) если .part нет, но есть полный или частичный файл с другого
+            #    зеркала — переиспользуем его только при совпадении контрольной
+            #    суммы первой части (гарантия, что байты идентичны)
+            if [ "$havesize" -eq 0 ]; then
+                for other in "${TARPART_PATH}".* "$TARBALL_PATH"; do
+                    [ "$other" = "$part" ] && continue
+                    [ -f "$other" ] || continue
+                    local osz; osz=$(stat -c%s "$other")
+                    [ "$osz" -gt 0 ] || continue
+                    if _part_matches_official "$other" "$osz"; then
+                        cp -f "$other" "$part"; havesize=$osz
+                        log "Переиспользую ${osz} байт из $(basename "$other") (контрольная сумма совпала)"
+                        break
+                    fi
+                done
+            fi
+            [ "$havesize" -ge "$TARBALL_SIZE" ] && break
+            # 3) проверка целостности уже скачанной части (первый 1 МиБ
+            #    сравниваем с эталоном с официального зеркала). Если часть
+            #    битая — начинаем с нуля, а не доклеиваем к мусору.
+            if [ "$havesize" -gt 0 ] && ! _part_matches_official "$part" "$havesize"; then
+                warn "Начало файла $part не совпадает с оригиналом — перекачиваю с нуля"
+                rm -f "$part"; havesize=0
+            fi
+            # 4) докачка недостающего хвоста диапазоном
+            log "Загрузка ${havesize}/${TARBALL_SIZE} байт..."
+            if ! _fetch_range "$url" "$part" "$havesize" "$TARBALL_SIZE"; then
+                warn "Не удалось докачать с $url — пробую следующее зеркало"
+                rm -f "$part"
+                break
+            fi
+            size=$(stat -c%s "$part" 2>/dev/null || echo 0)
+            if [ "$size" -le "$havesize" ]; then
+                warn "Сервер не добавил данных (${havesize} -> ${size}) — пробую следующее зеркало"
+                rm -f "$part"
+                break
+            fi
+        done
+        # проверка размера
+        if [ ! -f "$part" ] || [ "$(stat -c%s "$part")" -ne "$TARBALL_SIZE" ]; then
+            warn "Неполная загрузка с $url ($(( $(stat -c%s "$part" 2>/dev/null || echo 0) / 1048576 ))/${TARBALL_SIZE} байт)."
+            warn "Часть сохранена в $part — повторите 'make prepare' для докачки."
+            continue
+        fi
+        mv -f "$part" "$TARBALL_PATH"
+        if tar tf "$TARBALL_PATH" >/dev/null 2>&1; then
+            ok "Архив скачан и проверен ($(du -h "$TARBALL_PATH" | cut -f1))"
+            rm -f "${TARPART_PATH}".*   # подчистить части других зеркал
+            return 0
+        fi
+        warn "Архив повреждён ($url) — удаляю и пробую следующее зеркало"
+        rm -f "$TARBALL_PATH" "$part"
+    done
+    return 1
+}
+
+# Проверить, что первые min(size, 1MiB) байта файла совпадают с эталоном
+
+stage_prepare() {
+    require_root
+    init_dirs
+    log "=== Стадия: prepare ==="
+    log "Подготовка окружения..."
+
+    # Уже распаковано? (отметка или большое число файлов) — ничего не делаем.
+    if [[ -f "$SRC/.unpack-done" ]]; then
+        log "Пакеты уже распакованы ($SRC/.unpack-done) — пропускаю."
+        return 0
+    fi
+    local nfiles
+    nfiles=$(find "$SRC" -maxdepth 1 -type f 2>/dev/null | wc -l)
+    if (( nfiles >= 80 )); then
+        touch "$SRC/.unpack-done"
+        log "В $SRC уже $nfiles файлов — считаю распакованным, пропускаю."
+        return 0
+    fi
+
+    # Нужен ли вообще скачивать? Готовый tar переиспользуем.
+    if ! check_tarball "$SRC/$LFS_TARBALL"; then
+        rm -f "$SRC/$LFS_TARBALL"
+        log "Скачивание пакетов LFS $LFS_VERSION (~633 МБ)..."
+        if ! download_tarball; then
+            warn "Переключаюсь на поштучную загрузку пакетов..."
+            fetch_per_package || die "Не удалось получить пакеты LFS. Повторите: sudo make prepare"
+            touch "$SRC/.unpack-done"
+            log "✓ Пакеты готовы (поштучный режим)."
+            return 0
+        fi
+    else
+        log "✓ Архив уже скачан и цел ($SRC/$LFS_TARBALL), пропущено."
+    fi
+
+    log "Распаковка пакетов (~633 МБ, обычно 1–3 минуты, зависит от диска)..."
+    local tmpd root real
+    tmpd="$LFS/.unpack-tmp"
+    rm -rf "$tmpd"
+    mkdir -p "$tmpd"
+
+    # Распаковываем ВО ВРЕМЕННЫЙ каталог: при Ctrl+C/нехватке памяти не
+    # остаётся «огрызков» в sources, и следующий запуск начнёт чисто.
+    if ! tar xf "$SRC/$LFS_TARBALL" -C "$tmpd"; then
+        rm -rf "$tmpd"
+        die "Распаковка $SRC/$LFS_TARBALL завершилась с ошибкой (нехватка места?)"
+    fi
+
+    # Ищем реальный корневой каталог архива (обычно lfs-packages-13.0).
+    root="$tmpd/lfs-packages-${LFS_VERSION}"
+    if [[ ! -d "$root" ]]; then
+        real=$(tar tf "$SRC/$LFS_TARBALL" 2>/dev/null | head -n1 | cut -d/ -f1)
+        if [[ -n "$real" && -d "$tmpd/$real" ]]; then
+            root="$tmpd/$real"
+        else
+            # Архив без единого корневого каталога — содержимое tmpd и есть packages
+            root="$tmpd"
+        fi
+    fi
+    [[ -d "$root" ]] || { rm -rf "$tmpd"; die "Не найден корневой каталог распакованного архива"; }
+
+    # Переносим в sources: сначала содержимое, потом отметка о завершении.
+    if [[ "$root" == "$tmpd" ]]; then
+        cp -a "$tmpd"/. "$SRC"/
+    else
+        cp -a "$root"/. "$SRC"/
+    fi
+    rm -rf "$tmpd"
+
+    touch "$SRC/.unpack-done"
+    log "✓ Распаковано в $LFS/sources ($(find "$LFS/sources" -maxdepth 1 -type f | wc -l) файлов)."
+
+    chmod -v a+wt "$LFS/sources"
+
+    # --- Структура LFS ---
+    log "Создание базовой структуры..."
+    mkdir -pv "$LFS"/{etc,var} "$LFS"/usr/{bin,lib,sbin}
+    for i in bin lib sbin; do
+        [ -L "$LFS/$i" ] || ln -sv usr/$i "$LFS/$i"
+    done
+    case $(uname -m) in
+        x86_64) mkdir -pv "$LFS/lib64" ;;
+    esac
+    mkdir -pv "$LFS"/{tools,dev,proc,sys,run,tmp}
+
+    # --- Копировать скрипты ---
+    log "Копирование скриптов..."
+    [ -f "$PROJECT_DIR"/scripts/lfs-cross.sh ] || \
+        die "Нет scripts/lfs-*.sh! Скачайте из luisgbm/lfs-scripts"
+    cp -v "$PROJECT_DIR"/scripts/lfs-*.sh "$LFS/"
+
+    # --- Пользователь lfs ---
+    if ! id lfs >/dev/null 2>&1; then
+        log "Создание пользователя lfs..."
+        groupadd lfs
+        useradd -s /bin/bash -g lfs -m -k /dev/null lfs
+        # Без пароля — root сможет sudo -u lfs без запроса
+        passwd -d lfs 2>/dev/null || true
+        ok "Пользователь lfs создан (без пароля)"
+    fi
+
+    # --- Права ---
+    fix_ownership lfs
+    ok "Подготовка завершена"
+}
+
+# ============================================================
+# ЭТАП 2 — CROSS
+# ============================================================
+stage_cross() {
+    check_root
+    log "Сборка кросс-тулчейна (главы 5-6)..."
+
+    fix_ownership lfs
+
+    # Очищаем возможные остатки прошлой сборки
+    find "$LFS/sources" -maxdepth 1 -type d \( -name 'binutils-*' -o -name 'gcc-*' \) -exec rm -rf {} + rm -rf "$LFS"/tools/*
+
+    # Явно передаём все переменные — никаких .bash_profile!
+    sudo -u lfs env -i \
+        HOME=/home/lfs \
+        TERM="${TERM:-linux}" \
+        PS1='\u:\w\$ ' \
+        LFS="$LFS" \
+        LC_ALL=POSIX \
+        LFS_TGT="$(uname -m)-lfs-linux-gnu" \
+        PATH="$LFS/tools/bin:/usr/bin:/bin" \
+        CONFIG_SITE="$LFS/usr/share/config.site" \
+        MAKEFLAGS="-j$NPROC" \
+        bash -e "$LFS/lfs-cross.sh" 2>&1 | tee "$LOG/cross.log"
+
+    ok "Кросс-тулчейн собран"
+}
+
+# ============================================================
+# ЭТАП 3 — CHROOT (глава 7)
+# ============================================================
+stage_chroot() {
+    check_root
+    log "Сборка chroot-инструментов (глава 7)..."
+
+    unmount_all
+
+    # --- Владелец root ---
+    chown --from lfs -R root:root "$LFS"/{usr,var,etc,tools} 2>/dev/null || true
+    case $(uname -m) in
+        x86_64) chown --from lfs -R root:root "$LFS/lib64" 2>/dev/null || true ;;
+    esac
+
+    # --- Структура директорий (LFS 7.5) ---
+    log "Создание директорий (LFS 7.5)..."
+    mkdir -pv "$LFS"/{dev,proc,sys,run,tmp}
+    chmod 1777 "$LFS/tmp"
+    mkdir -pv "$LFS"/{boot,home,mnt,opt,srv}
+    mkdir -pv "$LFS"/etc/{opt,sysconfig}
+    mkdir -pv "$LFS"/lib/firmware
+    mkdir -pv "$LFS"/media/{floppy,cdrom}
+    mkdir -pv "$LFS"/usr/{,local/}{include,src}
+    mkdir -pv "$LFS"/usr/lib/locale
+    mkdir -pv "$LFS"/usr/local/{bin,lib,sbin}
+    mkdir -pv "$LFS"/usr/{,local/}share/{color,dict,doc,info,locale,man}
+    mkdir -pv "$LFS"/usr/{,local/}share/{misc,terminfo,zoneinfo}
+    mkdir -pv "$LFS"/usr/{,local/}share/man/man{1..8}
+    mkdir -pv "$LFS"/var/{cache,local,log,mail,opt,spool}
+    mkdir -pv "$LFS"/var/lib/{color,misc,locate}
+    install -dv -m 0750 "$LFS/root"
+    install -dv -m 1777 "$LFS/tmp" "$LFS/var/tmp"
+    ln -sfv /run "$LFS/var/run"
+    ln -sfv /run/lock "$LFS/var/lock"
+
+    # --- Essential files (LFS 7.6) ---
+    log "Создание /etc/passwd, /etc/group, /etc/hosts (LFS 7.6)..."
+    cat > "$LFS/etc/passwd" << "PASSWD"
+root:x:0:0:root:/root:/bin/bash
+bin:x:1:1:bin:/dev/null:/usr/bin/false
+daemon:x:6:6:Daemon User:/dev/null:/usr/bin/false
+messagebus:x:18:18:D-Bus Message Daemon User:/run/dbus:/usr/bin/false
+systemd-journal-gateway:x:73:73:systemd Journal Gateway:/:/usr/bin/false
+systemd-journal-remote:x:74:74:systemd Journal Remote:/:/usr/bin/false
+systemd-journal-upload:x:75:75:systemd Journal Upload:/:/usr/bin/false
+systemd-network:x:76:76:systemd Network Management:/:/usr/bin/false
+systemd-resolve:x:77:77:systemd Resolver:/:/usr/bin/false
+systemd-timesync:x:78:78:systemd Time Synchronization:/:/usr/bin/false
+systemd-coredump:x:79:79:systemd Core Dumper:/:/usr/bin/false
+uuidd:x:80:80:UUID Generation Daemon User:/dev/null:/usr/bin/false
+systemd-oom:x:81:81:systemd Out Of Memory Daemon:/:/usr/bin/false
+nobody:x:65534:65534:Unprivileged User:/dev/null:/usr/bin/false
+PASSWD
+
+    cat > "$LFS/etc/group" << "GROUP"
+root:x:0:
+bin:x:1:daemon
+sys:x:2:
+kmem:x:3:
+tape:x:4:
+tty:x:5:
+daemon:x:6:
+floppy:x:7:
+disk:x:8:
+lp:x:9:
+dialout:x:10:
+audio:x:11:
+video:x:12:
+utmp:x:13:
+clock:x:14:
+cdrom:x:15:
+adm:x:16:
+messagebus:x:18:
+systemd-journal:x:23:
+input:x:24:
+mail:x:34:
+kvm:x:61:
+systemd-journal-gateway:x:73:
+systemd-journal-remote:x:74:
+systemd-journal-upload:x:75:
+systemd-network:x:76:
+systemd-resolve:x:77:
+systemd-timesync:x:78:
+systemd-coredump:x:79:
+uuidd:x:80:
+systemd-oom:x:81:
+wheel:x:97:
+users:x:999:
+nogroup:x:65534:
+GROUP
+
+    cat > "$LFS/etc/hosts" << "HOSTS"
+127.0.0.1  localhost
+::1        localhost
+HOSTS
+
+    ln -sfv /proc/self/mounts "$LFS/etc/mtab"
+
+    # Лог-файлы
+    touch "$LFS/var/log/"{btmp,lastlog,faillog,wtmp}
+    chgrp -v utmp "$LFS/var/log/lastlog"
+    chmod -v 664 "$LFS/var/log/lastlog"
+    chmod -v 600 "$LFS/var/log/btmp"
+
+    # --- Монтирование ---
+    log "Монтирование виртуальных ФС..."
+    mount -v --bind /dev "$LFS/dev"
+    mount -vt devpts devpts -o gid=5,mode=0620 "$LFS/dev/pts"
+    mount -vt proc proc "$LFS/proc"
+    mount -vt sysfs sysfs "$LFS/sys"
+    mount -vt tmpfs tmpfs "$LFS/run"
+    mount -vt tmpfs -o mode=1777 tmpfs "$LFS/tmp"
+
+    # --- Chroot ---
+    log "Вход в chroot и сборка..."
+    chroot "$LFS" /usr/bin/env -i \
+        HOME=/root TERM="$TERM" PS1='(kwasos) \u:\w\$ ' \
+        PATH=/usr/bin:/usr/sbin \
+        MAKEFLAGS="-j$NPROC" \
+        TESTSUITEFLAGS="-j$NPROC" \
+        /bin/bash -e /lfs-chroot.sh 2>&1 | tee "$LOG/chroot.log"
+
+    # --- Отмонтировать ---
+    unmount_all
+    ok "Chroot-инструменты собраны"
+}
+
+# ============================================================
+# ЭТАП 4 — SYSTEM (глава 8)
+# ============================================================
+stage_system() {
+    check_root
+    log "Сборка базовой системы (глава 8, ~80 пакетов, ~30-60 мин)..."
+    unmount_all
+
+    # Перемонтировать (chroot вышел)
+    mkdir -pv "$LFS"/{dev,proc,sys,run,tmp}
+    mount -v --bind /dev "$LFS/dev"
+    mount -vt devpts devpts -o gid=5,mode=0620 "$LFS/dev/pts"
+    mount -vt proc proc "$LFS/proc"
+    mount -vt sysfs sysfs "$LFS/sys"
+    mount -vt tmpfs tmpfs "$LFS/run"
+    mount -vt tmpfs -o mode=1777 tmpfs "$LFS/tmp"
+
+    chroot "$LFS" /usr/bin/env -i \
+        HOME=/root TERM="$TERM" PS1='(kwasos) \u:\w\$ ' \
+        PATH=/usr/bin:/usr/sbin \
+        MAKEFLAGS="-j$NPROC" \
+        TESTSUITEFLAGS="-j$NPROC" \
+        /bin/bash -e /lfs-system.sh 2>&1 | tee "$LOG/system.log"
+
+    unmount_all
+    ok "Базовая система собрана"
+}
+
+# ============================================================
+# ЭТАП 5 — FINAL (главы 9-11)
+# ============================================================
+stage_final() {
+    check_root
+    log "Настройка и ядро (главы 9-11)..."
+    unmount_all
+
+    # Патчим grub-install (в WSL/контейнере не работает)
+    if grep -q "^grub-install " "$LFS/lfs-final.sh"; then
+        sed -i 's|^grub-install |true |' "$LFS/lfs-final.sh"
+    fi
+
+    mkdir -pv "$LFS"/{dev,proc,sys,run,tmp}
+    mount -v --bind /dev "$LFS/dev"
+    mount -vt devpts devpts -o gid=5,mode=0620 "$LFS/dev/pts"
+    mount -vt proc proc "$LFS/proc"
+    mount -vt sysfs sysfs "$LFS/sys"
+    mount -vt tmpfs tmpfs "$LFS/run"
+    mount -vt tmpfs -o mode=1777 tmpfs "$LFS/tmp"
+
+    # /boot/grub — grub-install упадёт если нет
+    mkdir -pv "$LFS/boot/grub"
+
+    chroot "$LFS" /usr/bin/env -i \
+        HOME=/root TERM="$TERM" PS1='(kwasos) \u:\w\$ ' \
+        PATH=/usr/bin:/usr/sbin \
+        MAKEFLAGS="-j$NPROC" \
+        TESTSUITEFLAGS="-j$NPROC" \
+        /bin/bash -e /lfs-final.sh 2>&1 | tee "$LOG/final.log"
+
+    unmount_all
+
+    ok "Ядро и настройка завершены"
+}
+
+# ============================================================
+# ЭТАП 6 — LIVE
+# ============================================================
+stage_live() {
+    check_root
+    log "Сборка Live ISO..."
+
+    local live_dir="$LFS/live_iso"
+    rm -rf "$live_dir"
+    mkdir -p "$live_dir/boot/grub" "$BUILD"
+
+    # --- Проверка ядра ---
+    local kernel_path="$LFS/boot/$KERNEL_NAME"
+    [ -f "$kernel_path" ] || die "Ядро не найдено: $kernel_path"
+    cp -v "$kernel_path" "$live_dir/boot/"
+
+    # --- System.map и config ---
+    [ -f "$LFS/boot/System.map-$KERNEL_VER" ] && \
+        cp -v "$LFS/boot/System.map-$KERNEL_VER" "$live_dir/boot/"
+    [ -f "$LFS/boot/config-$KERNEL_VER" ] && \
+        cp -v "$LFS/boot/config-$KERNEL_VER" "$live_dir/boot/"
+
+    # --- initramfs ---
+    log "Сборка initramfs..."
+    build_initramfs
+    cp -v "$LFS/boot/$INITRD_NAME" "$live_dir/boot/"
+
+    # --- GRUB ---
+    log "Копирование grub.cfg..."
+    if [ -f "$PROJECT_DIR/configs/grub.cfg" ]; then
+        cp -v "$PROJECT_DIR/configs/grub.cfg" "$live_dir/boot/grub/grub.cfg"
+    else
+        die "Нет configs/grub.cfg"
+    fi
+
+    # --- squashfs ---
+    log "Создание squashfs (15-30 минут)..."
+    rm -f "$live_dir/filesystem.squashfs"
+    # FIX: явно исключаем виртуальные каталоги и служебные пути
+    mksquashfs "$LFS" "$live_dir/filesystem.squashfs" \
+        -comp xz \
+        -e boot live_iso sources "lfs-packages-${LFS_VERSION}.tar" \
+           proc sys dev run tmp mnt media \
+           kwasos-*.iso 2>&1 | tail -20
+
+    # --- ISO ---
+    log "Сборка ISO через grub-mkrescue..."
+    rm -f "$BUILD/kwasos-$VERSION.iso"
+    grub-mkrescue -o "$BUILD/kwasos-$VERSION.iso" "$live_dir" --iso-level 3 2>&1 | tail -10
+
+    [ -f "$BUILD/kwasos-$VERSION.iso" ] || die "ISO не собрался"
+
+    # --- SHA256 ---
+    (cd "$BUILD" && sha256sum "kwasos-$VERSION.iso" > "kwasos-$VERSION.iso.sha256")
+
+    ok "ISO готов: $BUILD/kwasos-$VERSION.iso ($(du -h "$BUILD/kwasos-$VERSION.iso" | cut -f1))"
+}
+
+# ============================================================
+# СБОРКА INITRAMFS (встроенная)
+# ============================================================
+build_initramfs() {
+    local work="/tmp/kwasos-initramfs-$$"
+    rm -rf "$work"
+    mkdir -p "$work"/{bin,sbin,proc,sys,dev,mnt}
+
+    # busybox
+    cp /bin/busybox "$work/bin/busybox"
+    chmod +x "$work/bin/busybox"
+
+    # Симлинки
+    ( cd "$work/bin"
+      for cmd in sh mount umount mkdir mknod switch_root modprobe sleep \
+                 echo ls cat mdev blkid; do
+          ln -sf busybox "$cmd"
+      done )
+    ( cd "$work/sbin"
+      ln -sf /bin/busybox switch_root
+      ln -sf /bin/busybox mdev )
+
+    # init-скрипт
+    cp "$PROJECT_DIR/initramfs/init" "$work/init"
+    chmod +x "$work/init"
+
+    # Упаковка
+    ( cd "$work"
+      find . -print0 | cpio --null -ov --format=newc 2>/dev/null | \
+          gzip -9 > "$LFS/boot/$INITRD_NAME" )
+
+    rm -rf "$work"
+
+    local size
+    size=$(stat -c%s "$LFS/boot/$INITRD_NAME")
+    [ "$size" -gt 1000000 ] || die "initrd слишком маленький ($size байт) — что-то не так"
+    ok "initramfs собран: $(du -h "$LFS/boot/$INITRD_NAME" | cut -f1)"
+}
+
+# ============================================================
+# ALL — все стадии
+# ============================================================
+stage_all() {
+    run_stage prepare stage_prepare
+    run_stage cross   stage_cross
+    run_stage chroot  stage_chroot
+    run_stage system  stage_system
+    run_stage final   stage_final
+    run_stage live    stage_live
+
+    echo ""
+    echo "========================================="
+    echo " KwasOS $VERSION собран успешно!"
+    echo " ISO: $BUILD/kwasos-$VERSION.iso"
+    echo "========================================="
+}
+
+# ============================================================
+# ДИСПЕТЧЕР
+# ============================================================
+case "${1:-}" in
+    prepare) run_stage prepare stage_prepare ;;
+    cross)   run_stage cross   stage_cross ;;
+    chroot)  run_stage chroot  stage_chroot ;;
+    system)  run_stage system  stage_system ;;
+    final)   run_stage final   stage_final ;;
+    live)    run_stage live    stage_live ;;
+    all)     stage_all ;;
+    clean)
+        rm -rf "$LOG" "$STAMPS"
+        ok "Логи и маркеры очищены"
+        ;;
+    *)
+        cat <<HELP
+KwasOS Build System
+
+Использование: sudo make <stage>
+
+Стадии:
+  prepare   Скачать пакеты, создать структуру, создать пользователя lfs
+  cross     Кросс-тулчейн (главы 5-6)
+  chroot    Временные инструменты (глава 7)
+  system    Базовая система (глава 8, долго!)
+  final     Ядро и настройка (главы 9-11)
+  live      Сборка Live ISO
+  all       Всё подряд
+  clean     Очистить логи и маркеры
+
+Переменные:
+  FORCE=1   Перезапустить стадию, даже если она помечена как выполненная
+  LFS=...   Путь к LFS (по умолчанию /mnt/lfs)
+  VERSION=  Версия (по умолчанию 1.0)
+HELP
+        exit 1
+        ;;
+esac

@@ -1,0 +1,155 @@
+From 5927eacd2a66923485e0c66f4cd1e011d227f326 Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Thu, 15 Oct 2026 05:30:49 +0000
+Subject: [PATCH] build.sh: replace broken chunked downloader with wget -c +
+ live progress monitor
+
+The curl-range chunking from a78e525 stalled at '0 bytes' on real mirrors
+(redirects + per-chunk temp files) and wrote nothing to download.log.
+Now: single 'wget -c' (no -O, resume works natively), its full progress goes
+to logs/download.log, and a background monitor prints current byte count to
+the console every few seconds. Verified: fresh download, interrupted
+connection (partial kept), and resume-to-100% with byte-identical result.
+---
+ scripts/build.sh | 113 +++++++++++++++++------------------------------
+ 1 file changed, 41 insertions(+), 72 deletions(-)
+
+diff --git a/scripts/build.sh b/scripts/build.sh
+index 7e50d89..296db26 100755
+--- a/scripts/build.sh
++++ b/scripts/build.sh
+@@ -58,75 +58,41 @@ init_dirs() {
+ # Подготовка: скачивание и распаковка пакетов
+ #------------------------------------------------------------------------------
+ 
+-CHUNK_SIZE=$((32 * 1024 * 1024))   # 32 МБ на чанк
+-
+-# Загрузка одного диапазона байтов [from..to] с повторными попытками.
+-# curl: Range + дописывание в файл (-C - при существовании части).
+-fetch_range() {
+-    local url="$1" file="$2" from="$3" to="$4" attempt rc have
+-    for attempt in 1 2 3 4 5; do
+-        # если файл уже содержит нужный диапазон — пропускаем
+-        if [[ -f "$file" ]] && (( $(stat -c%s "$file") > to )); then
+-            echo "чанк ${from}-${to} уже загружен, пропуск"
+-            return 0
+-        fi
+-        if command -v curl >/dev/null 2>&1; then
+-            # -r скачивает диапазон; >> без --output-dir не подходит,
+-            # поэтому curl пишет во временный файл, затем дописываем.
+-            local tmp="$file.rangefetch"
+-            rm -f "$tmp"
+-            curl -fL --retry 3 --retry-delay 1 --retry-connrefused \
+-                 --connect-timeout 20 \
+-                 --speed-limit 1024 --speed-time 90 \
+-                 -r "${from}-${to}" -o "$tmp" "$url" 2>&1
+-            rc=$?
+-            if (( rc == 0 )) && [[ -s "$tmp" ]]; then
+-                cat "$tmp" >> "$file"
+-            fi
+-            rm -f "$tmp"
+-        else
+-            # Без curl: одна полная попытка wget -c (докачка с места
+-            # остановки), прогресс — в stdout.
+-            ( cd "$(dirname "$file")" && \
+-              wget -c --progress=dot:mega --tries=5 --timeout=60 \
+-                   --waitretry=15 "$(basename "$url")" ) 2>&1
+-            return 0
+-        fi
+-        have=$(stat -c%s "$file" 2>/dev/null || echo 0)
+-        if (( have > to )); then return 0; fi
+-        if (( rc != 0 )); then
+-            echo "curl вернул код $rc (попытка $attempt/5)"
+-            sleep $((attempt * 3))
+-        fi
+-    done
+-    return 1
+-}
+-
+-# Загрузка файла чанками по CHUNK_SIZE с докачкой с точного байта.
+-# Прогресс печатается в stdout (оттуда идёт и в консоль, и в download.log).
+-fetch_chunked() {
+-    local url="$1" file="$2" have total target rc=0
+-    while true; do
+-        have=$(stat -c%s "$file" 2>/dev/null || echo 0)
+-        if (( have >= TARBALL_SIZE )); then break; fi
+-        target=$(( have + CHUNK_SIZE - 1 ))
+-        (( target >= TARBALL_SIZE )) && target=$(( TARBALL_SIZE - 1 ))
+-        printf '[%(%H:%M:%S)T] Чанк %s-%s из %s (%d%%)\n' -1 \
+-               "$have" "$target" "$TARBALL_SIZE" \
+-               $(( have * 100 / TARBALL_SIZE ))
+-        if ! fetch_range "$url" "$file" "$have" "$target"; then
+-            rc=1; break
+-        fi
+-    done
+-    have=$(stat -c%s "$file" 2>/dev/null || echo 0)
+-    if (( rc == 0 && have >= TARBALL_SIZE )); then
++# Загрузка монолитного tar одной командой wget -c (без -O!):
++#  * wget сам докачивает с того байта, на котором произошёл обрыв;
++#  * прогресс wget пишет в stderr -> перенаправляем его в logs/download.log;
++#  * раз в несколько секунд печатаем актуальный прогресс в консоль,
++#    чтобы скрипт не выглядел «зависшим».
++# Возвращает 0, если размер файла достиг TARBALL_SIZE.
++download_with_wget() {
++    local url="$1" part="$2" pid wpid have last=0
++    ( cd "$(dirname "$part")" && \
++      wget -c --progress=dot:mega --tries=0 --timeout=60 --waitretry=15 \
++           "$url" ) >>"$LOG/download.log" 2>&1 &
++    pid=$!
++    # Дочерний монитор: печатает прогресс в stdout (консоль + tee в лог),
++    # пока wget жив. Когда wget умирает, monitor завершает цикл и выходит.
++    ( while kill -0 "$pid" 2>/dev/null; do
++          have=$(stat -c%s "$part" 2>/dev/null || echo 0)
++          if (( have != last )); then
++              printf '[%(%H:%M:%S)T] Загрузка: %s/%s байт (%d%%)\n' -1 \
++                     "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE ))
++              last=$have
++          fi
++          sleep 5
++      done ) &
++    wpid=$!
++    wait "$pid"; local rc=$?
++    kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
++    have=$(stat -c%s "$part" 2>/dev/null || echo 0)
++    if (( have >= TARBALL_SIZE )); then
+         printf '[%(%H:%M:%S)T] ✓ Загрузка завершена: %s/%s байт (100%%)\n' \
+                -1 "$have" "$TARBALL_SIZE"
+-    else
+-        printf '[%(%H:%M:%S)T] ⏳ Остановлено на %s/%s байт (%d%%)\n' -1 \
+-               "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE ))
++        return 0
+     fi
+-    return $rc
++    printf '[%(%H:%M:%S)T] ⏳ Остановлено на %s/%s байт (%d%%), wget rc=%s\n' \
++           -1 "$have" "$TARBALL_SIZE" $(( have * 100 / TARBALL_SIZE )) "$rc"
++    return 1
+ }
+ 
+ # Целостность готового tar: точный размер + читается ли архив целиком
+@@ -159,14 +125,17 @@ download_tarball() {
+         mkdir -p "$partdir"
+ 
+         got=$(stat -c%s "$part" 2>/dev/null || echo 0)
+-        log "Загрузка $got/$TARBALL_SIZE байт уже есть."
+-        log "Прогресс в реальном времени: tail -f $LOG/download.log"
++        if (( got > 0 )); then
++            log "Продолжаю загрузку: $got/$TARBALL_SIZE байт уже есть."
++        else
++            log "Начинаю загрузку 0/$TARBALL_SIZE байт..."
++        fi
++        log "Подробный прогресс wget: tail -f $LOG/download.log"
+ 
+         # ВАЖНО: НЕ используем wget -O — с ним --continue молча качает с нуля.
+-        # Загрузка чанками по 32 МБ (curl Range / wget -c): при обрыве связи
+-        # или Ctrl+C часть остаётся на диске, повторный запуск продолжает
+-        # с того же байта. Прогресс — и в консоли, и в logs/download.log.
+-        fetch_chunked "$url" "$part" | tee -a "$LOG/download.log"
++        # wget -c докачивает с того же байта после обрыва; прогресс печатается
++        # монитором в консоль и дублируется в logs/download.log.
++        download_with_wget "$url" "$part" | tee -a "$LOG/download.log"
+ 
+         # Если от предыдущих версий скрипта остался .part — объединяем один раз.
+         if [[ -f "$part" && -f "$part.part" ]]; then
+-- 
+2.39.5
+
