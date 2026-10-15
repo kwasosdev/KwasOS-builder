@@ -125,37 +125,22 @@ download_tarball() {
         mkdir -p "$partdir"
 
         got=$(stat -c%s "$part" 2>/dev/null || echo 0)
-        if (( got > 0 )); then
-            log "Продолжаю загрузку: $got/$TARBALL_SIZE байт уже есть."
-        else
-            log "Начинаю загрузку 0/$TARBALL_SIZE байт..."
-        log "Загрузка $got/$TARBALL_SIZE байт уже есть."
-
         # Если загрузка уже завершена, но проверка ещё не выполнялась
         # (например, прошлый запуск прервали Ctrl+C сразу после wget),
         # сразу переходим к проверке целостности.
-        if (( got == TARBALL_SIZE )); then
-            log "Файл уже загружен полностью, проверяю целостность..."
-        else
+        if (( got >= TARBALL_SIZE )); then
+            log "Файл уже загружен полностью ($got/$TARBALL_SIZE байт), проверяю целостность..."
+        elif (( got > 0 )); then
+            log "Продолжаю загрузку: $got/$TARBALL_SIZE байт уже есть."
             log "Прогресс в реальном времени: tail -f $LOG/download.log"
-
-            # ВАЖНО: НЕ используем -O — с ним --continue молча качает с нуля.
-            # wget запускается из partdir и пишет в ./$LFS_TARBALL(.part).
-            # Прогресс (-nv пишет его в STDERR!) перенаправляем именно так:
-            # stdout+stderr -> logs/download.log.
-            if ! ( cd "$partdir" && \
-                   wget -c -nv --progress=dot:mega --tries=10 \
-                        --timeout=60 --waitretry=15 \
-                        --user-agent="wget" "$url" ) >>"$LOG/download.log" 2>&1; then
-                warn "wget завершился с ошибкой (см. $LOG/download.log)"
-            fi
+            download_with_wget "$url" "$part" | tee -a "$LOG/download.log"
+            rc=$?
+        else
+            log "Начинаю загрузку 0/$TARBALL_SIZE байт..."
+            log "Прогресс в реальном времени: tail -f $LOG/download.log"
+            download_with_wget "$url" "$part" | tee -a "$LOG/download.log"
+            rc=$?
         fi
-        log "Подробный прогресс wget: tail -f $LOG/download.log"
-
-        # ВАЖНО: НЕ используем wget -O — с ним --continue молча качает с нуля.
-        # wget -c докачивает с того же байта после обрыва; прогресс печатается
-        # монитором в консоль и дублируется в logs/download.log.
-        download_with_wget "$url" "$part" | tee -a "$LOG/download.log"
 
         # Если от предыдущих версий скрипта остался .part — объединяем один раз.
         if [[ -f "$part" && -f "$part.part" ]]; then
@@ -171,17 +156,16 @@ download_tarball() {
 
         # Неполный файл: если размер меньше ожидаемого — это просто
         # обрыв связи, оставляем часть для докачки при следующем запуске.
-        rc=$?
         got=$(stat -c%s "$part" 2>/dev/null || echo 0)
         if (( got > 0 && got < TARBALL_SIZE )); then
-            warn "Загрузка прервана на ${got}/${TARBALL_SIZE} байт (rc=$rc)."
+            warn "Загрузка прервана на ${got}/${TARBALL_SIZE} байт (wget rc=${rc:-0})."
             warn "Повторите: sudo make prepare — продолжит с этого места."
             return 1
         fi
         # Размер «достигнут», но архив битый -> пробуем следующее зеркало.
         warn "Файл с $url непригоден, пробую следующее зеркало..."
         rm -f "$part" "$part".part
-        done
+    done
     return 1
 }
 
