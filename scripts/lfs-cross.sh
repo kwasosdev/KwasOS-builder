@@ -13,18 +13,27 @@ begin() {
 
 	echo "[lfs-cross] Starting build of $package_name at $(date)"
 
-	tar xf $package_name.$package_ext
-	cd $package_name
+	tar xf "$SRC_DIR/$package_name.$package_ext" || return 1
+	cd "$package_name" || return 1
 }
 
 finish() {
 	echo "[lfs-cross] Finishing build of $package_name at $(date)"
 
-	cd $LFS/sources
-	rm -rf $package_name
+	cd "$SRC_DIR"
+	rm -rf "$package_name"
 }
 
-cd $LFS/sources
+# Останавливаем сборку при первой же ошибке (раньше скрипт «падал молча»,
+# а make всё равно возвращал 0 и следующие стадии шли по битой системе).
+set -e
+
+SRC_DIR="${LFS:-/mnt/lfs}/sources"
+LFS_TGT="${LFS_TGT:-$(uname -m)-lfs-linux-gnu}"
+export LFS_TGT
+
+mkdir -p "$LFS/usr/share/man" "$LFS/tools"   # ln/mv внутри шагов не падали на пустом дереве
+cd "$SRC_DIR"
 
 # 5.2. Binutils-2.46.0 - Pass 1
 begin binutils-2.46.0 tar.xz
@@ -90,7 +99,10 @@ begin linux-6.18.10 tar.xz
 make mrproper
 make headers
 find usr/include -type f ! -name '*.h' -delete
-cp -rv usr/include $LFS/usr
+# FIX: заголовки ИДУТ В СИСТРООТ кросс-компилятора ($LFS), иначе
+# LFS_TGT-gcc не находит linux/*.h и сборка glibc падает.
+mkdir -p "$LFS/usr"
+cp -rv usr/include "$LFS/usr"
 finish
 
 # 5.5. Glibc-2.43
