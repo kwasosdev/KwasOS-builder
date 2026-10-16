@@ -741,11 +741,13 @@ finish
 
 # 8.53. Python-3.14.3
 begin Python-3.14.3 tar.xz
-./configure --prefix=/usr          \
-            --enable-shared        \
-            --with-system-expat    \
+./configure --prefix=/usr       \
+            --enable-shared     \
+            --with-system-expat \
             --enable-optimizations \
-            --without-static-libpython
+            --with-lto          \
+            CFLAGS="-fprofile-update=atomic" \
+            CXXFLAGS="-fprofile-update=atomic"
 # Book command is plain "make". With --enable-optimizations, Python 3.14 runs a
 # PGO profiling pass. On some hosts, test_generators.SignalAndYieldFromTest.
 # test_raise_and_yield_from fails *only* under the -fprofile-generate build
