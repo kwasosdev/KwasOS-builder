@@ -32,6 +32,20 @@ source "$(dirname "$0")/chroot-reexec.sh"
 
 cd /sources
 
+# 7.5. Creating Directories
+mkdir -pv /usr/lib/locale
+mkdir -pv /usr/local/{bin,lib,sbin}
+mkdir -pv /usr/{,local/}share/{color,dict,doc,info,locale,man}
+mkdir -pv /var/{cache,local,log,mail,opt,spool}
+mkdir -pv /var/lib/{color,misc,locate}
+ln -sfv /run /var/run
+ln -sfv /run/lock /var/lock
+install -dv -m 0750 /root
+install -dv -m 1777 /tmp /var/tmp
+
+# 8.3. Man-pages-6.17
+begin man-pages-6.17 tar.xz
+
 # 8.3. Man-pages-6.17
 begin man-pages-6.17 tar.xz
 rm -v man3/crypt*
