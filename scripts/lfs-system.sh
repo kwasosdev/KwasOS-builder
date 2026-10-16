@@ -10,13 +10,30 @@ package_name=""
 package_ext=""
 
 begin() {
-	package_name=$1
-	package_ext=$2
+    package_name=$1
+    package_ext=$2
+    local stamp="$LFS/.stamps/packages/$package_name.done"
 
-	echo "[lfs-system] Starting build of $package_name at $(date)"
+    if [ -f "$stamp" ]; then
+        echo "[lfs-system] Пакет $package_name уже собран, пропускаю."
+        SKIP_PACKAGE=1
+        return 0
+    fi
+    SKIP_PACKAGE=0
 
-	tar xf "/sources/$package_name.$package_ext" || return 1
-	cd "$package_name" || return 1
+    echo "[lfs-system] Starting build of $package_name at $(date)"
+    rm -rf "$package_name"
+    tar xf "/sources/$package_name.$package_ext" || return 1
+    cd "$package_name" || return 1
+}
+
+finish() {
+    if [ "${SKIP_PACKAGE:-0}" = "1" ]; then return 0; fi
+    echo "[lfs-system] Finishing build of $package_name at $(date)"
+    mkdir -p "$LFS/.stamps/packages"
+    touch "$LFS/.stamps/packages/$package_name.done"
+    cd /sources
+    rm -rf "$package_name"
 }
 
 finish() {
