@@ -465,7 +465,7 @@ popd
             AWK=gawk
 make
 make DESTDIR=$LFS install
-ln -sv libncursesw.so $LFS/usr/lib/libncurses.so
+ln -sfv libncursesw.so $LFS/usr/lib/libncurses.so
 sed -e 's/^#if.*XOPEN.*$/#if 1/' \
     -i $LFS/usr/include/curses.h
 finish
@@ -478,7 +478,7 @@ begin bash-5.3 tar.gz
             --without-bash-malloc
 make
 make DESTDIR=$LFS install
-ln -sv bash $LFS/bin/sh
+ln -sfv bash $LFS/bin/sh
 finish
 
 # 6.5. Coreutils-9.10
@@ -665,5 +665,5 @@ cd       build
     LDFLAGS_FOR_TARGET=-L$PWD/$LFS_TGT/libgcc
 make
 make DESTDIR=$LFS install
-ln -sv gcc $LFS/usr/bin/cc
+ln -sfv gcc $LFS/usr/bin/cc
 finish
