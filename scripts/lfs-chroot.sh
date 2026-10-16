@@ -4,6 +4,8 @@
 # by Luís Mendes :)
 # Updated for LFS 13.0
 
+export MAKEFLAGS="-j$(nproc)"
+
 package_name=""
 package_ext=""
 
