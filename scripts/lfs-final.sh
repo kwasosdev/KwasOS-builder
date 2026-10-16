@@ -3,8 +3,8 @@
 # Final steps to configure and boot the system (chapters 9-11)
 # by Luís Mendes :)
 # Updated for LFS 13.0
-# FIX: добавлены опции ядра для Live-режима (squashfs/overlay/loop/USB),
-#      брендинг заменён с LFS на KwasOS.
+
+export MAKEFLAGS="-j$(nproc)"
 
 package_name=""
 package_ext=""
