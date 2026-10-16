@@ -4,12 +4,11 @@
 # Если мы на хосте (нет /sources) — монтирует виртуальные ФС и перезапускает
 # текущий скрипт через chroot. После выхода размонтирует.
 
-# (c) kirka
-
 if [ ! -d /sources ]; then
     export LFS="${LFS:-/mnt/lfs}"
     SELF="$(readlink -f "$0")"
     SELF_NAME="$(basename "$SELF")"
+    SELF_DIR="$(dirname "$SELF")"
 
     mkdir -pv "$LFS"/{dev,proc,sys,run,tmp,var}
     mkdir -pv "$LFS"/dev/pts
@@ -25,7 +24,13 @@ if [ ! -d /sources ]; then
         mountpoint -q "$LFS/dev/shm" || mount -vt tmpfs -o nosuid,nodev tmpfs "$LFS/dev/shm"
     fi
 
+    # Копируем и сам перезапускаемый скрипт, и эту преамбулу,
+    # чтобы source внутри chroot нашёл chroot-reexec.sh по пути /tmp/.
     cp -v "$SELF" "$LFS/tmp/$SELF_NAME"
+    if [ -f "$SELF_DIR/chroot-reexec.sh" ]; then
+        cp -v "$SELF_DIR/chroot-reexec.sh" "$LFS/tmp/chroot-reexec.sh"
+    fi
+
     chroot "$LFS" /usr/bin/env -i \
         HOME=/root \
         TERM="${TERM:-linux}" \
