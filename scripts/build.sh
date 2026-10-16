@@ -23,6 +23,7 @@ LFS="${LFS:-/mnt/lfs}"
 SRC="$LFS/sources"
 LOG="$(cd "$(dirname "$0")/.." && pwd)/logs"
 BUILD_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+export MAKEFLAGS="-j$(nproc)"
 
 LFS_VERSION="13.0"
 TARBALL_SIZE=633282560   # точный Content-Length lfs-packages-13.0.tar
