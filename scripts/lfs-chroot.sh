@@ -25,9 +25,45 @@ finish() {
 }
 
 # Останавливаем сборку при первой же ошибке (см. комментарий в lfs-cross.sh).
-set -e
+# --- Если запущены на хосте — войти в chroot и перезапустить себя ---
+if [ ! -d /sources ]; then
+    export LFS="${LFS:-/mnt/lfs}"
 
-cd /sources
+    # 1) Каталоги внутри нового корня
+    mkdir -pv "$LFS"/{dev,proc,sys,run,tmp,var}
+    mkdir -pv "$LFS"/dev/pts
+
+    # 2) Монтирование виртуальных ФС
+    mountpoint -q "$LFS/dev"       || mount -v --bind /dev "$LFS/dev"
+    mountpoint -q "$LFS/dev/pts"   || mount -vt devpts devpts -o gid=5,mode=0620 "$LFS/dev/pts"
+    mountpoint -q "$LFS/proc"      || mount -vt proc proc "$LFS/proc"
+    mountpoint -q "$LFS/sys"       || mount -vt sysfs sysfs "$LFS/sys"
+    mountpoint -q "$LFS/run"       || mount -vt tmpfs tmpfs "$LFS/run"
+    if [ -h "$LFS/dev/shm" ]; then
+        mkdir -pv "$LFS/$(readlink "$LFS/dev/shm")"
+    else
+        mountpoint -q "$LFS/dev/shm" || mount -vt tmpfs -o nosuid,nodev tmpfs "$LFS/dev/shm"
+    fi
+
+    # 3) Копируем скрипт внутрь и запускаем в chroot
+    cp -v "$0" "$LFS/tmp/lfs-chroot.sh"
+    chroot "$LFS" /usr/bin/env -i \
+        HOME=/root \
+        TERM="${TERM:-linux}" \
+        PS1='(lfs chroot) \u:\w\$ ' \
+        PATH=/usr/bin:/usr/sbin \
+        MAKEFLAGS="-j$(nproc)" \
+        TESTSUITEFLAGS="-j$(nproc)" \
+        /bin/bash /tmp/lfs-chroot.sh
+    rc=$?
+
+    # 4) Размонтирование (порядок важен)
+    for mp in dev/pts dev/shm dev proc sys run; do
+        mountpoint -q "$LFS/$mp" && umount -v "$LFS/$mp" || true
+    done
+    exit $rc
+fi
+# --- Конец преамбулы; дальше идёт обычная логика, теперь уже внутри chroot ---
 
 # 7.7. Gettext-1.0
 begin gettext-1.0 tar.xz
