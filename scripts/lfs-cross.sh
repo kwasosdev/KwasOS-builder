@@ -241,6 +241,48 @@ prepare_packages() {
     log "✓ Распаковано в $SRC_DIR ($(find "$SRC_DIR" -maxdepth 1 -type f | wc -l) файлов)."
 }
 
+# --- Загрузка патчей LFS ---
+fetch_patches() {
+    local patch_dir="${PATCH_DIR:-$SRC_DIR}"
+    mkdir -p "$patch_dir"
+    # Массив «url|имя_файла»
+    local patches=(
+        "http://lfs.linux-sysadmin.com/patches/downloads/glibc/glibc-fhs-1.patch|glibc-fhs-1.patch"
+        "http://lfs.linux-sysadmin.com/patches/downloads/glibc/glibc-2.43-upstream_fixes-1.patch|glibc-2.43-upstream_fixes-1.patch"
+    )
+    local entry url name dest
+    for entry in "${patches[@]}"; do
+        url="${entry%%|*}"
+        name="${entry##*|}"
+        dest="$patch_dir/$name"
+        if [[ -s "$dest" ]] && head -1 "$dest" | grep -qE '^(diff|---|\+\+\+)'; then
+            log "✓ Патч уже есть: $name"
+            continue
+        fi
+        log "Скачиваю патч: $name"
+        if ! wget -c -nv -O "$dest.tmp" "$url" >>"$DOWNLOAD_LOG" 2>&1; then
+            warn "Не удалось скачать $name с $url"
+            rm -f "$dest.tmp"
+            # Попробуем зеркало
+            local alt="https://www.linuxfromscratch.org/patches/downloads/glibc/$name"
+            log "Пробую зеркало: $alt"
+            if wget -c -nv -O "$dest.tmp" "$alt" >>"$DOWNLOAD_LOG" 2>&1; then
+                mv -f "$dest.tmp" "$dest"
+            else
+                rm -f "$dest.tmp"
+                die "Патч $name не удалось скачать ни с одного зеркала"
+            fi
+        else
+            mv -f "$dest.tmp" "$dest"
+        fi
+        if ! head -1 "$dest" | grep -qE '^(diff|---|\+\+\+)'; then
+            warn "Файл $dest не похож на патч (первые байты: $(head -c 40 "$dest" | tr -d '\n'))"
+        else
+            log "✓ Патч скачан: $name ($(du -h "$dest" | cut -f1))"
+        fi
+    done
+}
+
 # --- Функции сборки (begin / finish) ---
 begin() {
     package_name=$1
@@ -261,6 +303,7 @@ require_root
 check_host_deps
 init_dirs
 prepare_packages
+fetch_patches
 cd "$SRC_DIR"
 
 # 5.2. Binutils-2.46.0 - Pass 1
