@@ -26,11 +26,9 @@ finish() {
 	rm -rf "$package_name"
 }
 
-# Останавливаем сборку при первой же ошибке (см. комментарий в lfs-cross.sh).
 set -e
-
-# Если запущены на хосте — войти в chroot и перезапустить себя.
 source "$(dirname "$0")/chroot-reexec.sh"
+export MAKEFLAGS="-j$(nproc)"
 
 cd /sources
 
