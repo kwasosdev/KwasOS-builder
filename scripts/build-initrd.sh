@@ -3,6 +3,8 @@
 # Copyright (C) 2026 KwasOS Project
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+export MAKEFLAGS="-j$(nproc)"
+
 set -euo pipefail
 
 LFS="${LFS:-/mnt/lfs}"
