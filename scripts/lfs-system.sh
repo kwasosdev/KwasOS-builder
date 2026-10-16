@@ -27,6 +27,9 @@ finish() {
 # Останавливаем сборку при первой же ошибке (см. комментарий в lfs-cross.sh).
 set -e
 
+# Если запущены на хосте — войти в chroot и перезапустить себя.
+source "$(dirname "$0")/chroot-reexec.sh"
+
 cd /sources
 
 # 8.3. Man-pages-6.17
