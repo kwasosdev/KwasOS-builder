@@ -354,6 +354,7 @@ case $(uname -m) in
     ;;
 esac
 patch -Np1 -i ../glibc-fhs-1.patch
+patch -Np1 -i ../glibc-2.43-upstream_fixes-1.patch
 mkdir -p build
 cd       build
 echo "rootsbindir=/usr/sbin" > configparms
