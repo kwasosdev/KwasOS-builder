@@ -1033,8 +1033,8 @@ finish
 
 # 8.79. D-Bus-1.16.2
 begin dbus-1.16.2 tar.xz
-mkdir build
-cd    build
+mkdir -p build
+cd       build
 meson setup --prefix=/usr --buildtype=release --wrap-mode=nofallback ..
 ninja
 ninja install
