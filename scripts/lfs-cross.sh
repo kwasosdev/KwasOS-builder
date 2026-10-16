@@ -3,11 +3,8 @@
 # Builds the cross-toolchain and cross compiling temporary tools from chapters 5 and 6
 # by Luís Mendes :)
 # Updated for LFS 13.0
-#
-# Автономный вариант: сам скачивает и распаковывает пакеты LFS,
-# проверяет зависимости хоста и не требует предварительного `make prepare`.
-#
-# Запуск: sudo ./scripts/lfs-cross.sh
+
+export MAKEFLAGS="-j$(nproc)"
 
 set -e
 
