@@ -59,7 +59,15 @@ check_host_deps() {
 }
 
 init_dirs() {
-    mkdir -p "$LFS" "$SRC_DIR" "$LOG_DIR" "$LFS/tools" "$LFS/tools/bin" "$LFS/usr/share/man"
+    mkdir -p "$LFS" "$SRC_DIR" "$LOG_DIR" "$LFS/tools" "$LFS/tools/bin"
+    mkdir -pv "$LFS"/{etc,var}
+    mkdir -pv "$LFS"/usr/{bin,lib,sbin,share/man}
+    for i in bin lib sbin; do
+        [ -L "$LFS/$i" ] || ln -sv usr/"$i" "$LFS/$i"
+    done
+    case $(uname -m) in
+        x86_64) [ -d "$LFS/lib64" ] || mkdir -pv "$LFS/lib64" ;;
+    esac
 }
 
 # --- Загрузка и распаковка пакетов LFS (аналог stage_prepare из build.sh) ---
