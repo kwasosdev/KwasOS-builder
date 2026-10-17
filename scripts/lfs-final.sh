@@ -28,6 +28,8 @@ finish() {
 
 # Останавливаем сборку при первой же ошибке (см. комментарий в lfs-cross.sh).
 set -e
+source "$(dirname "$0")/chroot-reexec.sh"
+export MAKEFLAGS="-s -j$(nproc)"
 
 cd /sources
 
