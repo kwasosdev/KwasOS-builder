@@ -279,31 +279,50 @@ stage_prepare() {
 STAMPS="$LFS/.stamps"
 
 run_stage_script() {
-    # $1 — имя стадии (cross|chroot|system|final), $2 — скрипт в scripts/
     local name="$1" script="$BUILD_DIR/scripts/$2"
     require_root
     init_dirs
     mkdir -p "$STAMPS"
+
     if [[ -f "$STAMPS/$name.done" ]]; then
         log "Стадия '$name' уже выполнена ($STAMPS/$name.done) — пропускаю."
         log "Для пересборки: rm -f $STAMPS/$name.done (или 'sudo make clean')."
         return 0
     fi
+
     [[ -x "$SRC" ]] || die "Каталог $SRC не найден. Сначала выполните: sudo make prepare"
     [[ -f "$script" ]] || die "Не найден скрипт: $script"
+
     log "=== Стадия: $name ($(basename "$script")) ==="
-    if bash -n "$script"; then
-        :
-    else
-        die "Синтаксическая ошибка в $script — исправьте её перед запуском"
-    fi
-    # Экспортируем переменные, которые ждут внутренние скрипты
+    bash -n "$script" || die "Синтаксическая ошибка в $script — исправьте её перед запуском"
+
     export LFS LFS_TGT="${LFS_TGT:-$(uname -m)-lfs-linux-gnu}"
-    if ! bash "$script" 2>&1 | tee -a "$LOG/$name.log"; then
-        die "Стадия '$name' завершилась с ошибкой (см. $LOG/$name.log)"
+
+    # Тихий make: -s убирает эхо "gcc -c ..." для каждой команды.
+    # Если MAKEFLAGS уже задан снаружи — не перетираем.
+    if [[ -z "${MAKEFLAGS:-}" ]]; then
+        export MAKEFLAGS="-s -j$(nproc)"
     fi
-    local rc=${PIPESTATUS[0]}
+
+    # Ротация лога: каждый запуск стадии — новый файл, старый уходит в .prev
+    if [[ -f "$LOG/$name.log" ]]; then
+        mv -f "$LOG/$name.log" "$LOG/$name.log.prev"
+    fi
+
+    # Полный вывод -> лог; на экран -> только ключевые строки.
+    bash "$script" > "$LOG/$name.log" 2>&1 &
+    local pid=$!
+
+    # Следим за логом в реальном времени, фильтруем мусор
+    tail --pid="$pid" -f "$LOG/$name.log" 2>/dev/null \
+        | grep --line-buffered -E \
+            'Starting build of|Finishing build of|ОШИБКА|ERROR|Стадия|✓|✗|cannot|failed|No such file'
+
+    wait "$pid"
+    local rc=$?
+
     (( rc == 0 )) || die "Стадия '$name' завершилась с кодом $rc (см. $LOG/$name.log)"
+
     touch "$STAMPS/$name.done"
     log "✓ Стадия '$name' завершена."
 }
